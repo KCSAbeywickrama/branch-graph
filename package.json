@@ -1,0 +1,13 @@
+{
+  "name": "branch-graph",
+  "version": "1.0.0",
+  "description": "Visualize the Claude Code session fork tree and resume any branch in-session (zero LLM tokens).",
+  "bin": {
+    "branch-graph": "./branch-graph.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "Apache-2.0",
+  "private": true
+}
