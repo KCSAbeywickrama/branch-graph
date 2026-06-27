@@ -94,6 +94,10 @@ function cleanPrompt(str) {
 function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
+// Claude Code auto-names a `/branch` (created without a name) as "<…> (Branch N)".
+// We only treat an EXPLICIT `/branch myname` name as a real name, so auto names are
+// ignored and those branches fall back to their first prompt.
+const AUTO_NAME_RE = /\(Branch(\s+\d+)?\)\s*$/;
 
 // ---------- scan one session file ----------
 //
@@ -109,8 +113,8 @@ function truncate(s, n) {
 // line's `leafUuid`; we fall back to the last message in the file.
 async function scanSession(file, sessionId) {
   const info = { sessionId, parent: null, forkMsg: null, label: null,
-    title: null, promptFull: '' };
-  let title = null, slug = null;
+    name: null, named: false, title: null, promptFull: '' };
+  let title = null, slug = null, name = null;
   let lastForkMsg = null;        // messageUuid of the last replayed line = divergence leaf
   let leafUuid = null, lastUuid = null;
   const nodes = new Map();       // uuid -> { parent, type, isMeta, fork, content }
@@ -132,6 +136,8 @@ async function scanSession(file, sessionId) {
       const t = o.title || o.aiTitle || o.content;
       if (typeof t === 'string' && t.trim()) title = t.trim();
     }
+    // User-set display name (the one shown in /resume). Last write wins (renames).
+    if (typeof o.customTitle === 'string' && o.customTitle.trim()) name = o.customTitle.trim();
     if (!slug && typeof o.slug === 'string') slug = o.slug;
     if (o.uuid) {
       lastUuid = o.uuid;
@@ -166,10 +172,16 @@ async function scanSession(file, sessionId) {
   }
 
   info.title = title;
+  // Only an explicit `/branch myname` counts as a name; auto "(Branch N)" is ignored.
+  info.name = (name && !AUTO_NAME_RE.test(name.trim())) ? cleanPrompt(name) : null;
+  info.named = Boolean(info.name);
   // Fork point: prefer the divergence message in the parent (first own node's parent);
   // fall back to the last replayed message when the fork has no new turns.
   info.forkMsg = info.parent ? (firstNewParent || lastForkMsg) : null;
-  info.label = title || firstPrompt || slug || sessionId.slice(0, 8);
+  // Label precedence: aiTitle → user name → first prompt. Titles and names are a
+  // descriptive label (rendered bold); the first prompt is shown as plain text.
+  info.label = title || info.name || firstPrompt || slug || sessionId.slice(0, 8);
+  info.strong = Boolean(title || info.name); // bold when the label is a title or name
   info.promptFull = (firstPrompt || slug || '').slice(0, 4000);
   return info;
 }
@@ -231,7 +243,9 @@ function renderList(rows, projectName, meta) {
     const tree = `${r.prefix}${r.connector}${glyph}`.padEnd(
       treeW + (useColor && highlighted ? 9 : 0));
     const sid = cyan(n.sessionId.slice(0, 8));
-    const label = truncate(n.label, 40).padEnd(labelW);
+    // A title or name is shown bold; a first prompt is shown as plain text.
+    const plain = truncate(n.label, 40).padEnd(labelW);
+    const label = n.strong ? bold(plain) : plain;
     let action;
     if (n.current) action = yellow('← current (this session)');
     else {
@@ -366,17 +380,18 @@ function runInteractive(rows, ctx) {
     const n = r.node;
     const idx = String(r.index).padStart(idxW);
     const sid = n.sessionId.slice(0, 8);
-    const marker = n.current ? '  ← current' : n.latest ? '  (most recent)' : '';
+    const tag = n.current ? '  ← current' : n.latest ? '  (most recent)' : '';
     const fixed = `${idx}  ${r.prefix}${r.connector}● ${sid}  `;
-    const room = Math.max(8, cols - fixed.length - marker.length);
+    const room = Math.max(8, cols - fixed.length - tag.length);
     const label = truncate(n.label, room);
-    let text = `${fixed}${label}${marker}`;
+    let text = `${fixed}${label}${tag}`;
     if (text.length > cols) text = text.slice(0, cols);
     if (isSel) return '\x1b[7m' + text.padEnd(cols) + '\x1b[0m';
-    // non-selected: colorize the glyph + id
+    // non-selected: colorize glyph + id; bold a title/name, plain a first prompt
     const glyph = n.current ? green('●') : n.latest ? yellow('●') : '●';
-    return `${idx}  ${r.prefix}${r.connector}${glyph} ${cyan(sid)}  ${label}` +
-      (marker ? dim(marker) : '');
+    const shownLabel = n.strong ? bold(label) : label;
+    return `${idx}  ${r.prefix}${r.connector}${glyph} ${cyan(sid)}  ${shownLabel}` +
+      (tag ? dim(tag) : '');
   }
 
   function buildDetail(node, cols) {
@@ -390,8 +405,11 @@ function runInteractive(rows, ctx) {
     lines.push(bold(node.sessionId));
     lines.push(dim(`${parent} · last active ${formatTime(node.mtime)}`));
     lines.push('');
-    if (node.title) lines.push(bold(truncate(node.title, width)));
-    const body = node.promptFull || node.label || dim('(no prompt text)');
+    // Heading: aiTitle, else the user name (same precedence as the label). Body is
+    // always the first prompt, so a titled/named branch shows both.
+    const heading = node.title || node.name;
+    if (heading) lines.push(bold(truncate(heading, width)));
+    const body = node.promptFull || dim('(no prompt text)');
     const wrapped = wrapText(body, width);
     const maxLines = 6;
     for (const wl of wrapped.slice(0, maxLines)) lines.push(wl);
@@ -629,6 +647,9 @@ function help() {
       parent: r.node.effectiveParent,
       forkMessageUuid: r.node.forkMsg,
       label: r.node.label,
+      name: r.node.name,
+      named: r.node.named,
+      firstPrompt: r.node.promptFull || null,
       current: r.node.current,
       latest: Boolean(r.node.latest),
       resume: r.node.current ? null : resumeLine(r.node.sessionId),
