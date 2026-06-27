@@ -82,6 +82,8 @@ function resolveProjectDir(project) {
 // ---------- label cleanup ----------
 function cleanPrompt(str) {
   return str
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;]*m/g, '') // strip ANSI color (e.g. pasted tool output)
     .replace(/<command-[^>]*>[\s\S]*?<\/command-[^>]*>/g, '')
     .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
     .replace(/<[^>]+>/g, '')
@@ -97,6 +99,13 @@ async function scanSession(file, sessionId) {
   const info = { sessionId, parent: null, forkMsg: null, label: null,
     title: null, promptFull: '' };
   let title = null, slug = null, firstPrompt = null;
+  // A `/branch` fork replays the parent's history into the new file, tagging every
+  // copied line with `forkedFrom` (its `messageUuid` equals that line's own uuid).
+  // The branch's OWN messages have no `forkedFrom`. So:
+  //   - lastForkMsg   = messageUuid of the last replayed line = divergence leaf
+  //   - firstNewParent = parentUuid of the branch's first own message = fork point
+  // and the branch's first typed prompt is the first non-replayed user message.
+  let lastForkMsg = null, firstNewParent = null, sawNew = false;
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: 'utf8' }),
     crlfDelay: Infinity,
@@ -105,9 +114,13 @@ async function scanSession(file, sessionId) {
     if (!line) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
-    if (!info.parent && o.forkedFrom && o.forkedFrom.sessionId) {
-      info.parent = o.forkedFrom.sessionId;
-      info.forkMsg = o.forkedFrom.messageUuid || null;
+    if (o.forkedFrom && o.forkedFrom.sessionId) {
+      if (!info.parent) info.parent = o.forkedFrom.sessionId;
+      if (o.forkedFrom.messageUuid) lastForkMsg = o.forkedFrom.messageUuid;
+    } else if (!sawNew && o.uuid && (o.type === 'user' || o.type === 'assistant')) {
+      // first line that belongs to THIS branch rather than replayed history
+      sawNew = true;
+      firstNewParent = o.parentUuid || null;
     }
     if (typeof o.aiTitle === 'string' && o.aiTitle.trim()) title = o.aiTitle.trim();
     else if (o.type === 'ai-title') {
@@ -115,13 +128,19 @@ async function scanSession(file, sessionId) {
       if (typeof t === 'string' && t.trim()) title = t.trim();
     }
     if (!slug && typeof o.slug === 'string') slug = o.slug;
-    if (!firstPrompt && o.type === 'user' && !o.isMeta && o.message &&
+    // The branch's own first typed prompt: first user message that is NOT replayed
+    // history (no forkedFrom). For a root/un-forked session this is just its first
+    // prompt; for a fork it's the first prompt entered after the branch point.
+    if (!firstPrompt && o.type === 'user' && !o.isMeta && !o.forkedFrom && o.message &&
         typeof o.message.content === 'string') {
       const cleaned = cleanPrompt(o.message.content);
       if (cleaned) firstPrompt = cleaned;
     }
   }
   info.title = title;
+  // Fork point: prefer the divergence message in the parent (first own message's
+  // parent); fall back to the last replayed message when the fork has no new turns.
+  info.forkMsg = info.parent ? (firstNewParent || lastForkMsg) : null;
   info.label = title || firstPrompt || slug || sessionId.slice(0, 8);
   info.promptFull = (firstPrompt || slug || '').slice(0, 4000);
   return info;
