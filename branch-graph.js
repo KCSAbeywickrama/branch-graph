@@ -26,10 +26,11 @@ const readline = require('readline');
 // ---------- args ----------
 function parseArgs(argv) {
   const opts = { project: null, json: false, list: false, help: false, index: null,
-    color: null, interactive: null };
+    color: null, interactive: null, debugMouse: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
+    else if (a === '--debug-mouse') opts.debugMouse = true;
     else if (a === '--json') opts.json = true;
     else if (a === '--list') opts.list = true;
     else if (a === '-i' || a === '--interactive') opts.interactive = true;
@@ -248,6 +249,61 @@ function renderList(rows, projectName, meta) {
   return lines.join('\n');
 }
 
+// ---------- mouse diagnostic ----------
+// `branch-graph --debug-mouse`: mirrors the picker's setup EXACTLY (alternate screen
+// + any-motion tracking) and counts motion events. Move the pointer inside WITHOUT
+// clicking or re-entering the window. On exit it reports how many motion events it
+// saw — if 0 until you move out and back in, the terminal suppresses motion on the
+// alternate screen (the iTerm2 quirk we're chasing); if it counts up immediately,
+// the terminal is fine and the bug is elsewhere.
+function debugMouse() {
+  const out = process.stdout, inp = process.stdin;
+  if (!out.isTTY || !inp.isTTY) {
+    process.stderr.write('branch-graph --debug-mouse: needs a real terminal ' +
+      '(run it directly in your shell, not via Claude Code `!`).\n');
+    process.exit(2);
+  }
+  const w = (s) => out.write(s);
+  let count = 0, last = 'none', done = false;
+  function finish() {
+    if (done) return; done = true;
+    try { inp.setRawMode(false); } catch { /* ignore */ }
+    w('\x1b[?1003l\x1b[?1006l'); // mouse off
+    w('\x1b[?25h\x1b[?1049l');   // cursor on, leave alt screen
+    out.write(`\nSaw ${count} motion event(s) on the alternate screen. last: ${last}\n` +
+      (count === 0
+        ? 'iTerm2 quirk CONFIRMED: motion is suppressed on the alt screen until re-entry.\n'
+        : 'Alt screen reports motion fine — the picker bug is elsewhere.\n'));
+    process.exit(0);
+  }
+  function paint() {
+    let b = '\x1b[H\x1b[2J';
+    b += 'Mouse debug — alt-screen, mirrors the picker.\r\n';
+    b += 'MOVE inside WITHOUT clicking or re-entering the window. Press q to quit.\r\n\r\n';
+    b += `motion events: ${count}\r\n`;
+    b += `last: ${last}\r\n`;
+    if (count === 0) {
+      b += '\r\n(still 0 — keep moving inside. If it only counts up after you move out\r\n';
+      b += ' and back in, that confirms the alt-screen motion-onset quirk.)\r\n';
+    }
+    w(b);
+  }
+  // Same init order/sequences as runInteractive().
+  inp.setRawMode(true);
+  inp.setEncoding('utf8');
+  w('\x1b[?1049h\x1b[?25l');       // alt screen + hide cursor
+  w('\x1b[?1003h\x1b[?1006h');     // any-motion + SGR coords
+  paint();
+  inp.on('data', (d) => {
+    if (d.includes('q') || d.includes('\x03')) return finish();
+    const m = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(d);
+    if (m && (+m[1] & 32)) { count++; last = `b=${m[1]} x=${m[2]} y=${m[3]} ${m[4]}`; paint(); }
+  });
+  inp.resume();
+  process.on('SIGINT', finish);
+  process.on('exit', () => { if (!done) { try { inp.setRawMode(false); } catch {} w('\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l'); } });
+}
+
 // ---------- interactive TUI (standalone terminal only, zero deps) ----------
 function wrapText(s, width) {
   const out = [];
@@ -279,16 +335,19 @@ function runInteractive(rows, ctx) {
   if (selected < 0) selected = 0;
   let scrollTop = 0;
   let rowYMap = []; // 1-based screen line -> row index, for mouse hit-testing
+  let inputBuf = ''; // carries a partial escape sequence between data events
+  let escTimer = null;
   const w = (s) => out.write(s);
 
   let restored = false;
   function restore() {
     if (restored) return;
     restored = true;
+    if (escTimer) { clearTimeout(escTimer); escTimer = null; }
     try { if (inp.setRawMode) inp.setRawMode(false); } catch { /* ignore */ }
     w('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l'); // mouse off
-    w('\x1b[?25h');   // cursor on
-    w('\x1b[?1049l'); // leave alt screen
+    w('\x1b[2J\x1b[H'); // clear our full-screen UI from the main buffer
+    w('\x1b[?25h');     // cursor on
     try { inp.pause(); } catch { /* ignore */ }
   }
   function quit(code) { restore(); process.exit(code); }
@@ -395,34 +454,91 @@ function runInteractive(rows, ctx) {
     }
   }
 
+  // A lone ESC that never grows into a sequence within the timeout = the Escape key.
+  function flushPending() {
+    escTimer = null;
+    const p = inputBuf; inputBuf = '';
+    if (p === '\x1b') quit(0); // Escape key → quit
+    // otherwise a stalled/garbled partial sequence: drop it
+  }
+  function armFlush() {
+    if (escTimer) clearTimeout(escTimer);
+    escTimer = setTimeout(flushPending, 50);
+  }
+
+  // Terminal input can split an escape sequence across data events — in any-motion
+  // mouse mode (1003), motion floods events, so mid-sequence splits are common. The
+  // old parser mis-handled a split: it advanced past the stray ESC and desynced the
+  // stream, so hover/clicks did nothing until the next event happened to resync (and
+  // a split right at the ESC byte could even quit). We now buffer a partial sequence
+  // and re-join it with the next chunk, and parse CSI/SS3 generically so unknown or
+  // incomplete sequences are never mistaken for the Escape key.
   function onData(data) {
+    if (escTimer) { clearTimeout(escTimer); escTimer = null; }
+    const buf = inputBuf + data;
+    inputBuf = '';
     let i = 0;
-    while (i < data.length) {
-      const rest = data.slice(i);
-      const m = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(rest);
-      if (m) { handleMouse(+m[1], +m[2], +m[3], m[4]); i += m[0].length; continue; }
-      if (rest.startsWith('\x1b[A')) { move(-1); i += 3; continue; }
-      if (rest.startsWith('\x1b[B')) { move(1); i += 3; continue; }
-      if (rest.startsWith('\x1b[H')) { selected = 0; render(); i += 3; continue; }
-      if (rest.startsWith('\x1b[F')) { selected = rows.length - 1; render(); i += 3; continue; }
-      const ch = data[i];
-      if (ch === '\r' || ch === '\n') { resume(rows[selected].node); return; }
-      if (ch === 'k') { move(-1); i++; continue; }
-      if (ch === 'j') { move(1); i++; continue; }
-      if (ch === 'g') { selected = 0; render(); i++; continue; }
-      if (ch === 'G') { selected = rows.length - 1; render(); i++; continue; }
-      if (ch === 'q' || ch === '\x03' || ch === '\x1b') { quit(0); return; }
-      i++;
+    while (i < buf.length) {
+      const ch = buf[i];
+      if (ch !== '\x1b') {
+        if (ch === '\r' || ch === '\n') { resume(rows[selected].node); return; }
+        else if (ch === 'k') move(-1);
+        else if (ch === 'j') move(1);
+        else if (ch === 'g') { selected = 0; render(); }
+        else if (ch === 'G') { selected = rows.length - 1; render(); }
+        else if (ch === 'q' || ch === '\x03') { quit(0); return; }
+        i++; continue;
+      }
+      const rest = buf.slice(i);
+      if (rest === '\x1b') { inputBuf = rest; armFlush(); return; } // ESC key or seq start
+      if (rest[1] === '[') { // CSI: params [0x30-3f], intermediates [0x20-2f], final [0x40-7e]
+        const csi = /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/.exec(rest);
+        if (!csi) { inputBuf = rest; armFlush(); return; } // incomplete → await more bytes
+        const seq = csi[0];
+        const mm = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(seq);
+        if (mm) handleMouse(+mm[1], +mm[2], +mm[3], mm[4]);
+        else {
+          const f = seq[seq.length - 1];
+          if (f === 'A') move(-1);
+          else if (f === 'B') move(1);
+          else if (f === 'H') { selected = 0; render(); }
+          else if (f === 'F') { selected = rows.length - 1; render(); }
+          // any other CSI (focus events, etc.): ignore rather than quit
+        }
+        i += seq.length; continue;
+      }
+      if (rest[1] === 'O') { // SS3 application cursor keys: ESC O <final>
+        if (rest.length < 3) { inputBuf = rest; armFlush(); return; }
+        const f = rest[2];
+        if (f === 'A') move(-1);
+        else if (f === 'B') move(1);
+        else if (f === 'H') { selected = 0; render(); }
+        else if (f === 'F') { selected = rows.length - 1; render(); }
+        i += 3; continue;
+      }
+      quit(0); return; // ESC + other byte (Alt-combo, etc.) → quit, as before
     }
   }
 
   inp.setRawMode(true);
-  inp.resume();
   inp.setEncoding('utf8');
-  w('\x1b[?1049h\x1b[?25l');          // alt screen + hide cursor
-  w('\x1b[?1000h\x1b[?1003h\x1b[?1006h'); // mouse: buttons + any-motion + SGR
+  // We render full-screen on the MAIN buffer, not the alternate screen (1049). iTerm2
+  // suppresses any-motion mouse reporting while the alt screen is active until the
+  // pointer re-enters the window, so hover felt dead when the cursor started inside;
+  // the main buffer reports motion immediately. render() uses absolute positioning
+  // (\x1b[H + \x1b[J), so we just hide the cursor and clear the screen ourselves.
+  w('\x1b[?25l');               // hide cursor
+  // Enable any-motion mouse tracking (1003 also reports button press/release) with
+  // SGR coordinates (1006). We deliberately do NOT set 1000 as well: 1000 and 1003
+  // are alternate tracking modes and setting 1000 first can leave terminals in
+  // press-only state.
+  w('\x1b[?1003h\x1b[?1006h');
+  w('\x1b[2J\x1b[H');           // clear the visible screen, cursor home
   render();
+  // Attach the data listener BEFORE resume(): once stdin is flowing with no listener,
+  // Node discards input, so early motion events (pointer already inside) were lost.
   inp.on('data', onData);
+  inp.resume();
   out.on('resize', render);
   process.on('SIGINT', () => quit(130));
   process.on('SIGTERM', () => quit(143));
@@ -457,6 +573,7 @@ function help() {
   const opts = parseArgs(process.argv.slice(2));
   useColor = decideColor(opts);
   if (opts.help) { console.log(help()); return; }
+  if (opts.debugMouse) { debugMouse(); return; }
 
   const dir = resolveProjectDir(opts.project);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
