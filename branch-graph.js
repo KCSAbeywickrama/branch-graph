@@ -95,17 +95,24 @@ function truncate(s, n) {
 }
 
 // ---------- scan one session file ----------
+//
+// A `/branch` fork replays the parent's history into the new file, tagging every
+// copied line with `forkedFrom` (whose `messageUuid` equals that line's own uuid).
+// The branch's OWN messages have no `forkedFrom`.
+//
+// Within a single session, rewinding to an earlier prompt and retyping appends a
+// NEW sibling: the old turns stay earlier in the file but become orphaned, and the
+// new turns hang off the same parent. So we must not pick prompts by file order —
+// we follow the ACTIVE path (current leaf back to root) and read the first own
+// prompt along it. Claude Code records the live head as the latest `last-prompt`
+// line's `leafUuid`; we fall back to the last message in the file.
 async function scanSession(file, sessionId) {
   const info = { sessionId, parent: null, forkMsg: null, label: null,
     title: null, promptFull: '' };
-  let title = null, slug = null, firstPrompt = null;
-  // A `/branch` fork replays the parent's history into the new file, tagging every
-  // copied line with `forkedFrom` (its `messageUuid` equals that line's own uuid).
-  // The branch's OWN messages have no `forkedFrom`. So:
-  //   - lastForkMsg   = messageUuid of the last replayed line = divergence leaf
-  //   - firstNewParent = parentUuid of the branch's first own message = fork point
-  // and the branch's first typed prompt is the first non-replayed user message.
-  let lastForkMsg = null, firstNewParent = null, sawNew = false;
+  let title = null, slug = null;
+  let lastForkMsg = null;        // messageUuid of the last replayed line = divergence leaf
+  let leafUuid = null, lastUuid = null;
+  const nodes = new Map();       // uuid -> { parent, type, isMeta, fork, content }
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: 'utf8' }),
     crlfDelay: Infinity,
@@ -114,13 +121,10 @@ async function scanSession(file, sessionId) {
     if (!line) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
+    if (o.type === 'last-prompt' && o.leafUuid) leafUuid = o.leafUuid; // live head pointer
     if (o.forkedFrom && o.forkedFrom.sessionId) {
       if (!info.parent) info.parent = o.forkedFrom.sessionId;
       if (o.forkedFrom.messageUuid) lastForkMsg = o.forkedFrom.messageUuid;
-    } else if (!sawNew && o.uuid && (o.type === 'user' || o.type === 'assistant')) {
-      // first line that belongs to THIS branch rather than replayed history
-      sawNew = true;
-      firstNewParent = o.parentUuid || null;
     }
     if (typeof o.aiTitle === 'string' && o.aiTitle.trim()) title = o.aiTitle.trim();
     else if (o.type === 'ai-title') {
@@ -128,18 +132,41 @@ async function scanSession(file, sessionId) {
       if (typeof t === 'string' && t.trim()) title = t.trim();
     }
     if (!slug && typeof o.slug === 'string') slug = o.slug;
-    // The branch's own first typed prompt: first user message that is NOT replayed
-    // history (no forkedFrom). For a root/un-forked session this is just its first
-    // prompt; for a fork it's the first prompt entered after the branch point.
-    if (!firstPrompt && o.type === 'user' && !o.isMeta && !o.forkedFrom && o.message &&
-        typeof o.message.content === 'string') {
-      const cleaned = cleanPrompt(o.message.content);
+    if (o.uuid) {
+      lastUuid = o.uuid;
+      const content = (o.type === 'user' && !o.isMeta && o.message &&
+        typeof o.message.content === 'string') ? o.message.content.slice(0, 4096) : null;
+      nodes.set(o.uuid, { parent: o.parentUuid || null, type: o.type,
+        isMeta: !!o.isMeta, fork: !!o.forkedFrom, content });
+    }
+  }
+
+  // Walk the active path: current leaf -> root, then read it root-first.
+  const head = (leafUuid && nodes.has(leafUuid)) ? leafUuid : lastUuid;
+  const path = [];
+  const seen = new Set();
+  for (let cur = head; cur && nodes.has(cur) && !seen.has(cur); cur = nodes.get(cur).parent) {
+    seen.add(cur);
+    path.push(cur);
+  }
+  path.reverse();
+
+  // First own (non-replayed) node on the active path marks the divergence; the first
+  // own user message with text is this branch's first typed prompt.
+  let firstPrompt = null, firstNewParent = null, sawNew = false;
+  for (const u of path) {
+    const n = nodes.get(u);
+    if (n.fork) continue;
+    if (!sawNew) { sawNew = true; firstNewParent = n.parent; }
+    if (!firstPrompt && n.type === 'user' && !n.isMeta && n.content) {
+      const cleaned = cleanPrompt(n.content);
       if (cleaned) firstPrompt = cleaned;
     }
   }
+
   info.title = title;
-  // Fork point: prefer the divergence message in the parent (first own message's
-  // parent); fall back to the last replayed message when the fork has no new turns.
+  // Fork point: prefer the divergence message in the parent (first own node's parent);
+  // fall back to the last replayed message when the fork has no new turns.
   info.forkMsg = info.parent ? (firstNewParent || lastForkMsg) : null;
   info.label = title || firstPrompt || slug || sessionId.slice(0, 8);
   info.promptFull = (firstPrompt || slug || '').slice(0, 4000);
