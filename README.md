@@ -77,7 +77,8 @@ It auto-activates whenever it's attached to a real terminal. Force it with
 ## Running inside a Claude Code session (side feature)
 
 You can also run `branch-graph` from *within* a Claude Code session via the `!` prefix,
-which runs it locally (still zero tokens):
+which runs it locally. The process itself uses zero LLM tokens, but its output lands
+directly in the conversation, where Claude reads and interprets it, which does cost tokens:
 
 ```
 !branch-graph        # list the fork tree, with a /resume line per branch
@@ -114,7 +115,7 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
 ## Limitations
 
 - Resumes whole **sessions** (`/branch` forks). There is no per-message resume in Claude Code.
-- Within-session **rewind** branches are intentionally excluded — Claude Code cannot
-  navigate to abandoned rewind branches.
+- Within-session **rewind** branches are intentionally excluded — Claude Code has no way
+  to navigate to abandoned rewind branches (no such feature exists yet; checked 2026-06-27).
 - In the in-session (`!` prefix) mode, the tool surfaces the `/resume <id>` line but cannot
   perform the switch itself; the separate-terminal picker can.
