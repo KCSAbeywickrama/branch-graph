@@ -65,12 +65,32 @@ Inside a Claude Code session (zero tokens — runs locally via the `!` prefix):
 
 Then paste the printed `/resume <id>` to switch to that branch in place.
 
-You can also run it as a normal terminal command (`branch-graph`).
+### Interactive picker (separate terminal)
+
+Run `branch-graph` in a normal terminal (not inside Claude Code) and it opens an
+interactive picker:
+
+- **↑/↓** or **j/k**, or **mouse hover** — move the selection.
+- The detail panel shows the focused branch's session id, fork point, last-active time,
+  and more of its starting prompt.
+- **Enter** or **left-click** a branch — launches a Claude session on it
+  (`claude -r <sessionId>`), handing the terminal over.
+- **Esc** — quit.
+
+It auto-activates only when attached to a real terminal; piped, `--json`, `--list`, a
+numeric index, or running inside Claude Code all fall back to plain output. Force it with
+`-i` / `--interactive`, or disable it with `--no-interactive`.
+
+> While the picker is open, mouse tracking captures clicks, so normal terminal
+> text-selection is intercepted — hold **Option** (iTerm2) or **Shift** (most terminals)
+> to select text instead.
 
 ### Flags
 
 | Flag | Description |
 | --- | --- |
+| `-i`, `--interactive` | Force the interactive picker (requires a terminal). |
+| `--no-interactive` | Force plain list output. |
 | `--project <path>` | Inspect a different project: pass a working dir, or a `~/.claude/projects/<dir>` path. |
 | `--json` | Machine-readable output (index, sessionId, parent, label, current, resume). |
 | `--list` | Force the list view. |
