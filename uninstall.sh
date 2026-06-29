@@ -10,6 +10,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 SOURCE="$SCRIPT_DIR/branch-graph.js"
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 TARGET="$BINDIR/branch-graph"
+TARGET_SHORT="$BINDIR/cbg"
 
 if [ -L "$TARGET" ]; then
   # Only remove if it points at our script (don't clobber an unrelated binary).
@@ -26,4 +27,18 @@ elif [ -e "$TARGET" ]; then
   exit 1
 else
   echo "Nothing to remove: $TARGET not found."
+fi
+
+if [ -L "$TARGET_SHORT" ]; then
+  LINK_DEST=$(readlink "$TARGET_SHORT" || true)
+  if [ "$LINK_DEST" = "$SOURCE" ]; then
+    rm -f "$TARGET_SHORT"
+    echo "Removed: $TARGET_SHORT"
+  else
+    echo "Skipped: $TARGET_SHORT points to $LINK_DEST (not this project); left untouched." >&2
+  fi
+elif [ -e "$TARGET_SHORT" ]; then
+  echo "Skipped: $TARGET_SHORT exists but is not a symlink; left untouched." >&2
+else
+  echo "Nothing to remove: $TARGET_SHORT not found."
 fi

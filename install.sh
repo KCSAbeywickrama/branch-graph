@@ -27,6 +27,14 @@ ln -s "$SOURCE" "$TARGET"
 
 echo "Installed: $TARGET -> $SOURCE"
 
+# Also install a short alias 'cbg'.
+TARGET_SHORT="$BINDIR/cbg"
+if [ -e "$TARGET_SHORT" ] || [ -L "$TARGET_SHORT" ]; then
+  rm -f "$TARGET_SHORT"
+fi
+ln -s "$SOURCE" "$TARGET_SHORT"
+echo "Installed: $TARGET_SHORT -> $SOURCE"
+
 # Warn if BINDIR is not on PATH.
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
@@ -39,4 +47,4 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Try it: branch-graph        (or inside Claude Code: !branch-graph)"
+echo "Try it: branch-graph  or  cbg    (or inside Claude Code: !branch-graph  or !cbg)"
