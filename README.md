@@ -46,42 +46,54 @@ and it opens an interactive picker over your project's fork tree:
 branch-graph
 ```
 
-This is what it looks like in a real terminal (captured from an actual run) — the
-branch list on top, a detail panel for the selected branch below it, updating live as
-you move the selection:
+Here's the same layout and spacing as the real implementation, with an example branch
+tree picked to show every kind of label `branch-graph` can display — the branch list on
+top, a detail panel for the selected branch below it, updating live as you move the
+selection:
 
 ```
-Branches in branch-graph-test
+Branches in my-project
 
-1  ● 615d27a5  branch-graph
-2  ● 13de9b43  Test Claude Code branching feature
-3  ├─● ac7d3bc7  b00 p0
-4  │  ├─● a3c7d9c6  b000 p0
-5  │  └─● 34e51181  This session is being continued from a previ…  (most recent)
-6  ├─● c4edbf82  b01 p0
-7  │  └─● 14a5a33c  b010 p0
-8  └─● 706ac5db  B02
+1  ● a4f3d8c2  Draft initial README outline
+2  ● 9b6e1f47  Design payment retry logic
+3  ├─● c8a2b91d  stripe-webhooks
+4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhooks
+5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration
+6  ├─● 7f2e8c15  paypal-webhooks
+7  │  └─● b3a6d904  Wire up PayPal IPN handler
+8  └─● e91f4a73  Add structured logging to webhook handlers  (most recent)
 
 ────────────────────────────────────────────────────────────────────────────────
-34e51181-2b47-4a77-b88e-10b8ee8119b5
-forked from ac7d3bc7 @ 8f12d678 · last active 6/29/2026, 9:30:32 PM
+1d4c9b82-3f6e-4a71-9c58-7b2e8f4a6d91
+forked from c8a2b91d @ 4f8a2c17 · last active 7/15/2026, 3:42:18 PM
 
-This session is being continued from a previous conversation that ran out of
-context. The summary below covers the earlier portion of the conversation.
-Summary: 1. Primary Request and Intent: The user is testing Claude Code's
-branching feature. The explicit request was: "im testing branching feature of
-calude code. just update the @file.txt with exactly what i typed from now
-onwards. no explaintions. just do it" The user wants to verify that file state
+Handle partial refunds and capture expiration edge cases. When a Stripe
+webhook reports a partial capture followed later by a refund, our local
+order state machine currently double-fires the fulfillment webhook
+because it doesn't check whether the capture was already reconciled. We
+need to track capture state per payment intent and make the refund
+handler idempotent so replayed webhook events don't trigger duplicate
 …
 
 ↑/↓ or hover: navigate   Enter/click: resume   Esc: quit
 ```
 
-Row 5 is the current selection — in the real terminal it's shown in reverse video
-(inverted colors), which a plain-text block can't reproduce. The tree on the left
-mirrors the fork structure (`├─`/`└─`/`│`), bold labels are explicit titles/names
-while plain ones are first-prompt text, and the detail panel below always reflects
-whichever row is currently selected.
+Row 5 is the current selection — shown in reverse video in a real terminal (a
+plain-text block can't reproduce that), with the detail panel below always describing
+whichever row is selected. The tree lines (`├─`/`└─`/`│`) mirror the fork structure
+exactly as `/branch` created it, and each label follows Claude Code's own precedence
+for naming a session:
+
+- **AI-generated title** — Claude's own summary of the session (`aiTitle`), shown
+  bold. Rows 1, 2, and 8.
+- **Explicit branch name** — set with `/branch <name>`, shown bold. Rows 3
+  (`stripe-webhooks`) and 6 (`paypal-webhooks`).
+- **First prompt** — falls back to the branch's own first typed message when it has
+  no title or name, shown as plain text. Rows 4, 5, and 7.
+
+(If none of those exist, `branch-graph` falls back further to a stored slug, then the
+raw session id.) Row 8 also carries `← current`, marking the session you launched
+`branch-graph` from.
 
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
 - The detail panel shows the focused branch's session id, fork point, last-active time,
