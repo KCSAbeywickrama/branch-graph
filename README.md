@@ -46,6 +46,43 @@ and it opens an interactive picker over your project's fork tree:
 branch-graph
 ```
 
+This is what it looks like in a real terminal (captured from an actual run) — the
+branch list on top, a detail panel for the selected branch below it, updating live as
+you move the selection:
+
+```
+Branches in branch-graph-test
+
+1  ● 615d27a5  branch-graph
+2  ● 13de9b43  Test Claude Code branching feature
+3  ├─● ac7d3bc7  b00 p0
+4  │  ├─● a3c7d9c6  b000 p0
+5  │  └─● 34e51181  This session is being continued from a previ…  (most recent)
+6  ├─● c4edbf82  b01 p0
+7  │  └─● 14a5a33c  b010 p0
+8  └─● 706ac5db  B02
+
+────────────────────────────────────────────────────────────────────────────────
+34e51181-2b47-4a77-b88e-10b8ee8119b5
+forked from ac7d3bc7 @ 8f12d678 · last active 6/29/2026, 9:30:32 PM
+
+This session is being continued from a previous conversation that ran out of
+context. The summary below covers the earlier portion of the conversation.
+Summary: 1. Primary Request and Intent: The user is testing Claude Code's
+branching feature. The explicit request was: "im testing branching feature of
+calude code. just update the @file.txt with exactly what i typed from now
+onwards. no explaintions. just do it" The user wants to verify that file state
+…
+
+↑/↓ or hover: navigate   Enter/click: resume   Esc: quit
+```
+
+Row 5 is the current selection — in the real terminal it's shown in reverse video
+(inverted colors), which a plain-text block can't reproduce. The tree on the left
+mirrors the fork structure (`├─`/`└─`/`│`), bold labels are explicit titles/names
+while plain ones are first-prompt text, and the detail panel below always reflects
+whichever row is currently selected.
+
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
 - The detail panel shows the focused branch's session id, fork point, last-active time,
   and more of its starting prompt.
