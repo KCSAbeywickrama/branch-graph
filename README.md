@@ -25,6 +25,9 @@ Requires Node.js (>= 16) on your PATH.
 BINDIR=/usr/local/bin ./install.sh # or choose another bin dir
 ```
 
+This also installs `cbg`, a short alias for `branch-graph` — use whichever you prefer,
+they're interchangeable everywhere in this README.
+
 If the install script warns that the bin dir isn't on your PATH, add it (e.g. to `~/.zshrc`):
 
 ```sh
@@ -43,7 +46,7 @@ The main way to use `branch-graph`. Run it in a normal terminal (not inside Clau
 and it opens an interactive picker over your project's fork tree:
 
 ```sh
-branch-graph
+branch-graph   # or the short alias: cbg
 ```
 
 Here's the same layout and spacing as the real implementation, with an example branch
@@ -132,6 +135,7 @@ directly in the conversation, where Claude reads and interprets it, which does c
 ```
 !branch-graph        # list the fork tree, with a /resume line per branch
 !branch-graph 2      # print only the /resume line for branch #2
+!cbg                 # short alias, same behavior
 ```
 
 It prints a ready `/resume <id>` for each branch; paste that to switch to the branch in
