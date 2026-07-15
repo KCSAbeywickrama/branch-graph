@@ -9,11 +9,15 @@ forked sessions, but the built-in `/resume` picker is a flat list that doesn't s
 session branched from which. `branch-graph` reconstructs and draws that tree.
 
 ```
-Branches in my-project:
-  1  ●   5c2f8a74  Discuss validation options…       /resume 5c2f8a74-…
-  2  ├─● 08fd2b0b  Try approach A…                   /resume 08fd2b0b-…
-  3  └─● 99d8c3b9  Try approach B…                   /resume 99d8c3b9-…
-  4     └─● 71642bc9  Refine B…            ← current (this session)
+Branches in my-project
+
+1  ● a4f3d8c2  Draft initial README outline
+2  ● 9b6e1f47  Design payment retry logic
+3  ├─● c8a2b91d  stripe-webhooks
+4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhooks
+5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration (most recent)
+6  └─● 7f2e8c15  paypal-webhooks
+...
 ```
 
 ## Install
