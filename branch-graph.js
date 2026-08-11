@@ -408,23 +408,22 @@ function runInteractive(rows, ctx) {
     const n = r.node;
     const idx = String(r.index).padStart(idxW);
     const sid = n.sessionId.slice(0, 8);
-    // Right-hand tag column: the current/most-recent marker when there is one, else a
-    // short last-active stamp so every row says when it was last touched. Flushed right
-    // (pad computed from plain lengths) so the stamps read as one column.
-    const tag = n.current ? '← current' : n.latest ? '(most recent)' : shortTime(n.mtime);
+    // Tag trailing the label: the current/most-recent marker when the row has one, else
+    // a short last-active stamp so every row says when it was last touched.
+    const stamp = shortTime(n.mtime);
+    const tag = n.current ? '  ← current' : n.latest ? '  (most recent)'
+      : (stamp ? '  ' + stamp : '');
     const fixed = `${idx}  ${r.prefix}${r.connector}● ${sid}  `;
-    const GAP = 2;                        // minimum space between label and tag
-    const room = Math.max(8, cols - fixed.length - tag.length - GAP);
+    const room = Math.max(8, cols - fixed.length - tag.length);
     const label = truncate(n.label, room);
-    const pad = tag ? Math.max(GAP, cols - fixed.length - label.length - tag.length) : 0;
-    let text = `${fixed}${label}${' '.repeat(pad)}${tag}`;
+    let text = `${fixed}${label}${tag}`;
     if (text.length > cols) text = text.slice(0, cols);
     if (isSel) return '\x1b[7m' + text.padEnd(cols) + '\x1b[0m';
     // non-selected: colorize glyph + id; bold a title/name, plain a first prompt
     const glyph = n.current ? green('●') : n.latest ? yellow('●') : '●';
     const shownLabel = n.strong ? bold(label) : label;
     return `${idx}  ${r.prefix}${r.connector}${glyph} ${cyan(sid)}  ${shownLabel}` +
-      ' '.repeat(pad) + (tag ? dim(tag) : '');
+      (tag ? dim(tag) : '');
   }
 
   function buildDetail(node, cols) {
