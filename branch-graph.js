@@ -113,8 +113,10 @@ const AUTO_NAME_RE = /\(Branch(\s+\d+)?\)\s*$/;
 // line's `leafUuid`; we fall back to the last message in the file.
 async function scanSession(file, sessionId) {
   const info = { sessionId, parent: null, forkMsg: null, label: null,
-    name: null, named: false, title: null, promptFull: '' };
+    name: null, named: false, title: null, heading: null, promptFull: '' };
   let title = null, slug = null, name = null;
+  // Line numbers of the last title/name write, so we can tell which one is newer.
+  let titleAt = -1, nameAt = -1, lineNo = 0;
   let lastForkMsg = null;        // messageUuid of the last replayed line = divergence leaf
   let leafUuid = null, lastUuid = null;
   const nodes = new Map();       // uuid -> { parent, type, isMeta, fork, content }
@@ -123,6 +125,7 @@ async function scanSession(file, sessionId) {
     crlfDelay: Infinity,
   });
   for await (const line of rl) {
+    lineNo++;
     if (!line) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
@@ -131,13 +134,20 @@ async function scanSession(file, sessionId) {
       if (!info.parent) info.parent = o.forkedFrom.sessionId;
       if (o.forkedFrom.messageUuid) lastForkMsg = o.forkedFrom.messageUuid;
     }
-    if (typeof o.aiTitle === 'string' && o.aiTitle.trim()) title = o.aiTitle.trim();
+    // Claude's own summary. NOTE: `/rename` on the LIVE session is also recorded here
+    // (it overwrites aiTitle), so this field is not purely machine-generated.
+    if (typeof o.aiTitle === 'string' && o.aiTitle.trim()) { title = o.aiTitle.trim(); titleAt = lineNo; }
     else if (o.type === 'ai-title') {
       const t = o.title || o.aiTitle || o.content;
-      if (typeof t === 'string' && t.trim()) title = t.trim();
+      if (typeof t === 'string' && t.trim()) { title = t.trim(); titleAt = lineNo; }
     }
-    // User-set display name (the one shown in /resume). Last write wins (renames).
-    if (typeof o.customTitle === 'string' && o.customTitle.trim()) name = o.customTitle.trim();
+    // User-set display name (the one shown in /resume), from `/rename` or `/branch
+    // <name>`. Last EXPLICIT write wins: auto "<parent> (Branch N)" names are skipped
+    // here so a later auto write can't clobber a name the user actually typed.
+    if (typeof o.customTitle === 'string' && o.customTitle.trim()) {
+      const t = o.customTitle.trim();
+      if (!AUTO_NAME_RE.test(t)) { name = t; nameAt = lineNo; }
+    }
     if (!slug && typeof o.slug === 'string') slug = o.slug;
     if (o.uuid) {
       lastUuid = o.uuid;
@@ -172,16 +182,20 @@ async function scanSession(file, sessionId) {
   }
 
   info.title = title;
-  // Only an explicit `/branch myname` counts as a name; auto "(Branch N)" is ignored.
-  info.name = (name && !AUTO_NAME_RE.test(name.trim())) ? cleanPrompt(name) : null;
+  // `name` already excludes auto "(Branch N)" names (filtered while scanning).
+  info.name = name ? cleanPrompt(name) : null;
   info.named = Boolean(info.name);
   // Fork point: prefer the divergence message in the parent (first own node's parent);
   // fall back to the last replayed message when the fork has no new turns.
   info.forkMsg = info.parent ? (firstNewParent || lastForkMsg) : null;
-  // Label precedence: aiTitle → user name → first prompt. Titles and names are a
-  // descriptive label (rendered bold); the first prompt is shown as plain text.
-  info.label = title || info.name || firstPrompt || slug || sessionId.slice(0, 8);
-  info.strong = Boolean(title || info.name); // bold when the label is a title or name
+  // A session can be named from two places: a `custom-title` record (`/rename` on a
+  // non-live session, `/branch <name>`) or an `aiTitle` write (Claude's summary, and
+  // `/rename` on the live session). Neither kind outranks the other — whichever landed
+  // LAST in the transcript is what Claude Code itself displays, so a rename always
+  // supersedes an older title and vice versa. Falls back to the first typed prompt.
+  info.heading = (info.name && nameAt >= titleAt) ? info.name : (title || info.name);
+  info.label = info.heading || firstPrompt || slug || sessionId.slice(0, 8);
+  info.strong = Boolean(info.heading); // bold for a name/title, plain for a first prompt
   info.promptFull = (firstPrompt || slug || '').slice(0, 4000);
   return info;
 }
@@ -341,6 +355,20 @@ function formatTime(ms) {
   try { return new Date(ms).toLocaleString(); } catch { return ''; }
 }
 
+// Short last-active stamp for the picker's tag column: `15/08  1:05PM`. Built by hand
+// rather than toLocaleString so the format and width are identical on every machine and
+// locale. Always 13 chars wide (hour space-padded) so the right-aligned tags line up.
+function shortTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+  const p2 = (n) => String(n).padStart(2, '0');
+  const h24 = d.getHours();
+  const h = h24 % 12 || 12;
+  return `${p2(d.getDate())}/${p2(d.getMonth() + 1)} ` +
+    `${String(h).padStart(2, ' ')}:${p2(d.getMinutes())}${h24 < 12 ? 'AM' : 'PM'}`;
+}
+
 function runInteractive(rows, ctx) {
   const out = process.stdout;
   const inp = process.stdin;
@@ -380,18 +408,23 @@ function runInteractive(rows, ctx) {
     const n = r.node;
     const idx = String(r.index).padStart(idxW);
     const sid = n.sessionId.slice(0, 8);
-    const tag = n.current ? '  ← current' : n.latest ? '  (most recent)' : '';
+    // Right-hand tag column: the current/most-recent marker when there is one, else a
+    // short last-active stamp so every row says when it was last touched. Flushed right
+    // (pad computed from plain lengths) so the stamps read as one column.
+    const tag = n.current ? '← current' : n.latest ? '(most recent)' : shortTime(n.mtime);
     const fixed = `${idx}  ${r.prefix}${r.connector}● ${sid}  `;
-    const room = Math.max(8, cols - fixed.length - tag.length);
+    const GAP = 2;                        // minimum space between label and tag
+    const room = Math.max(8, cols - fixed.length - tag.length - GAP);
     const label = truncate(n.label, room);
-    let text = `${fixed}${label}${tag}`;
+    const pad = tag ? Math.max(GAP, cols - fixed.length - label.length - tag.length) : 0;
+    let text = `${fixed}${label}${' '.repeat(pad)}${tag}`;
     if (text.length > cols) text = text.slice(0, cols);
     if (isSel) return '\x1b[7m' + text.padEnd(cols) + '\x1b[0m';
     // non-selected: colorize glyph + id; bold a title/name, plain a first prompt
     const glyph = n.current ? green('●') : n.latest ? yellow('●') : '●';
     const shownLabel = n.strong ? bold(label) : label;
     return `${idx}  ${r.prefix}${r.connector}${glyph} ${cyan(sid)}  ${shownLabel}` +
-      (tag ? dim(tag) : '');
+      ' '.repeat(pad) + (tag ? dim(tag) : '');
   }
 
   function buildDetail(node, cols) {
@@ -405,9 +438,10 @@ function runInteractive(rows, ctx) {
     lines.push(bold(node.sessionId));
     lines.push(dim(`${parent} · last active ${formatTime(node.mtime)}`));
     lines.push('');
-    // Heading: aiTitle, else the user name (same precedence as the label). Body is
-    // always the first prompt, so a titled/named branch shows both.
-    const heading = node.title || node.name;
+    // Heading: the winning name/title computed in scanSession (a rename supersedes the
+    // generated title rather than sitting alongside it). Body is always the first
+    // prompt, so a titled/named branch shows both.
+    const heading = node.heading;
     if (heading) lines.push(bold(truncate(heading, width)));
     const body = node.promptFull || dim('(no prompt text)');
     const wrapped = wrapText(body, width);
@@ -649,6 +683,7 @@ function help() {
       label: r.node.label,
       name: r.node.name,
       named: r.node.named,
+      title: r.node.title,
       firstPrompt: r.node.promptFull || null,
       current: r.node.current,
       latest: Boolean(r.node.latest),

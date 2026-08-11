@@ -61,14 +61,14 @@ selection:
 ```
 Branches in my-project
 
-1  ● a4f3d8c2  Draft initial README outline
-2  ● 9b6e1f47  Design payment retry logic
-3  ├─● c8a2b91d  stripe-webhooks
-4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhooks
-5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration
-6  ├─● 7f2e8c15  paypal-webhooks
-7  │  └─● b3a6d904  Wire up PayPal IPN handler
-8  └─● e91f4a73  Add structured logging to webhook handlers  (most recent)
+1  ● a4f3d8c2  Draft initial README outline                        10/07  9:14AM
+2  ● 9b6e1f47  Design payment retry logic                          12/07  4:03PM
+3  ├─● c8a2b91d  stripe-webhooks                                   13/07 10:22AM
+4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhoo…  14/07  1:47PM
+5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration  15/07  3:42PM
+6  ├─● 7f2e8c15  paypal-webhooks                                   15/07  5:08PM
+7  │  └─● b3a6d904  Wire up PayPal IPN handler                     16/07 11:30AM
+8  └─● e91f4a73  Add structured logging to webhook handlers        (most recent)
 
 ────────────────────────────────────────────────────────────────────────────────
 1d4c9b82-3f6e-4a71-9c58-7b2e8f4a6d91
@@ -91,20 +91,27 @@ whichever row is selected. The tree lines (`├─`/`└─`/`│`) mirror the f
 exactly as `/branch` created it, and each label follows Claude Code's own precedence
 for naming a session:
 
+- **Explicit branch name** — set with `/branch <name>` or `/rename`, shown bold. Rows 3
+  (`stripe-webhooks`) and 6 (`paypal-webhooks`). A name you set always wins over
+  Claude's generated title, so a `/rename` shows up here immediately.
 - **AI-generated title** — Claude's own summary of the session (`aiTitle`), shown
   bold. Rows 1, 2, and 8.
-- **Explicit branch name** — set with `/branch <name>`, shown bold. Rows 3
-  (`stripe-webhooks`) and 6 (`paypal-webhooks`).
 - **First prompt** — falls back to the branch's own first typed message when it has
   no title or name, shown as plain text. Rows 4, 5, and 7.
 
 (If none of those exist, `branch-graph` falls back further to a stored slug, then the
-raw session id.) Row 8 also carries `← current`, marking the session you launched
-`branch-graph` from.
+raw session id.) Labels are truncated to whatever room the row has left, as row 4 shows.
+
+The right-hand column is when that branch was **last active**, in short `DD/MM h:mmAM`
+form, so you can see at a glance which branches are fresh and which are stale. On the one
+row that carries a marker, the marker takes that slot instead: row 8's `(most recent)` —
+the newest session in the project — or `← current` when you launched `branch-graph` from
+inside a session of this project. The full timestamp for the selected row is in the detail
+panel below.
 
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
-- The detail panel shows the focused branch's session id, fork point, last-active time,
-  and more of its starting prompt.
+- The detail panel shows the focused branch's session id, fork point, full last-active
+  time, and more of its starting prompt.
 - **Enter** or **left-click** a branch — **launches a Claude session on it**
   (`claude -r <sessionId>`), handing the terminal over. This is the key advantage of the
   separate terminal: the picker switches you to the branch directly, no copy-paste.
@@ -167,6 +174,9 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
   (`← current (this session)`). If that session isn't part of the project being shown
   (e.g. you used `--project`, or ran it from a plain terminal), it instead flags the most
   recently written session as `(most recent)` so there's always a useful anchor.
+- Takes each branch's last-active time from its transcript file's modification time —
+  shown short (`15/08  1:05PM`) in the picker's right-hand column, in full in the detail
+  panel.
 - Surfaces a ready `/resume <id>` for each branch.
 
 ## Limitations
