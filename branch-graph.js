@@ -366,7 +366,7 @@ function shortTime(ms) {
   const h24 = d.getHours();
   const h = h24 % 12 || 12;
   return `${p2(d.getDate())}/${p2(d.getMonth() + 1)} ` +
-    `${String(h).padStart(2, ' ')}:${p2(d.getMinutes())}${h24 < 12 ? 'AM' : 'PM'}`;
+    `${h}:${p2(d.getMinutes())}${h24 < 12 ? 'AM' : 'PM'}`;
 }
 
 function runInteractive(rows, ctx) {
