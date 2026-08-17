@@ -356,6 +356,63 @@ function launchResume(sessionId) {
   process.exit(res.status == null ? 0 : res.status);
 }
 
+// Go up one fork level: hand the terminal to the parent branch, or print the paste-able
+// line when we can't own the terminal. Inside Claude Code's piped `!` a nested `claude`
+// would be wrong, so that case prints too. Shared by both `..` paths in main() so the
+// two can't drift apart.
+function goToParent(parentId, opts, canInteract) {
+  const canLaunch = canInteract && !process.env.CLAUDECODE &&
+    opts.interactive !== false && !opts.list;
+  if (canLaunch) launchResume(parentId); // never returns
+  console.log(resumeLine(parentId));
+  console.log(dim(`(other terminal: claude -r ${parentId})`));
+}
+
+// How many non-empty lines firstForkParent() reads before giving up. A fork's replayed
+// history starts at line 1, so 1 would do; the slack costs nothing and absorbs a stray
+// leading record without falling back to a full scan.
+const FORK_PROBE_LINES = 5;
+
+// The sessionId `file` forked from, read from the head of the transcript, or null if the
+// first few lines carry no `forkedFrom`.
+//
+// This is what makes `..` cheap. scanSession() takes the FIRST `forkedFrom` it sees, and
+// a fork tags every replayed line — starting at line 1 — so the answer is in the first
+// line of the file. Parsing every transcript in the project to learn it costs ~1.2s on a
+// 250MB project; reading one line costs microseconds.
+//
+// Callers must read null as "don't know", NOT "root": a root session and a fork whose
+// replay somehow starts past the probe window look identical from here, and only a full
+// scan can tell them apart (and only it has the label the root diagnostic prints).
+function firstForkParent(file) {
+  return new Promise((resolve) => {
+    let stream;
+    try { stream = fs.createReadStream(file, { encoding: 'utf8' }); }
+    catch { resolve(null); return; }
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let seen = 0, done = false;
+    // rl.close() can emit buffered 'line' events and always emits 'close', so every exit
+    // route funnels through this guard rather than resolving twice.
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      rl.close();
+      stream.destroy();
+      resolve(v);
+    };
+    stream.on('error', () => finish(null));
+    rl.on('line', (line) => {
+      if (!line) return;
+      let o;
+      try { o = JSON.parse(line); } catch { o = null; }
+      const from = o && o.forkedFrom && o.forkedFrom.sessionId;
+      if (from) finish(from);
+      else if (++seen >= FORK_PROBE_LINES) finish(null);
+    });
+    rl.on('close', () => finish(null));
+  });
+}
+
 function renderList(rows, projectName, meta) {
   const idxW = String(rows.length).length;
   // label column width for alignment
@@ -906,25 +963,57 @@ function help() {
   }
 
   const currentId = process.env.CLAUDE_CODE_SESSION_ID || null;
-  let newestFile = null, newestMtime = -1;
 
-  const nodes = [];
+  // Everything derivable from the directory listing alone, before a byte of any
+  // transcript is parsed: which sessions live here, and which was written last. The
+  // `..` fast path below runs on these; the scan loop reuses the same mtimes so both
+  // paths agree on which session is newest.
+  const idsHere = new Set(files.map((f) => path.basename(f, '.jsonl')));
+  const mtimes = new Map();
+  let newestFile = null, newestMtime = -1;
   for (const file of files) {
-    const sessionId = path.basename(file, '.jsonl');
     let mtime = 0;
     try { mtime = fs.statSync(file).mtimeMs; } catch {}
-    if (mtime > newestMtime) { newestMtime = mtime; newestFile = sessionId; }
-    const info = await scanSession(file, sessionId);
-    info.mtime = mtime;
-    nodes.push(info);
+    mtimes.set(file, mtime);
+    if (mtime > newestMtime) { newestMtime = mtime; newestFile = path.basename(file, '.jsonl'); }
   }
 
   // "current" = the session we're running inside, but only if it belongs to the
   // project being shown (CLAUDE_CODE_SESSION_ID matches a file here). Otherwise we
   // can't truthfully claim one is "this session" — fall back to flagging the most
   // recently written session as "most recent" so there's always a useful anchor.
-  const exactMatch = currentId && nodes.some((n) => n.sessionId === currentId);
+  const exactMatch = Boolean(currentId && idsHere.has(currentId));
   const elsewhere = currentId && !exactMatch; // current session is in another project
+
+  // A real terminal on both ends is what lets us hand the terminal over — to `claude -r`
+  // for `..`, or to the picker further down.
+  const canInteract = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+
+  // The anchor for `..`: the session we're running inside when it belongs to this
+  // project, else the most recently written one — the same precedence as the
+  // current/latest markers, so `..` means "up from where I just was".
+  const anchorId = exactMatch ? currentId : newestFile;
+
+  // `..` fast path. Going up needs exactly two facts — the anchor and what it forked
+  // from — and both are cheap, so answer without parsing the project. --json and a
+  // branch number describe the whole tree, so those keep the full scan. Anything
+  // firstForkParent() can't settle (root, or a parent whose transcript lives in another
+  // project) falls through to the scan below, which owns the diagnostics.
+  if (opts.parent && !opts.json && opts.index == null && anchorId) {
+    const parentId = await firstForkParent(path.join(dir, anchorId + '.jsonl'));
+    if (parentId && idsHere.has(parentId)) {
+      goToParent(parentId, opts, canInteract);
+      return;
+    }
+  }
+
+  const nodes = [];
+  for (const file of files) {
+    const info = await scanSession(file, path.basename(file, '.jsonl'));
+    info.mtime = mtimes.get(file) || 0;
+    nodes.push(info);
+  }
+
   for (const n of nodes) {
     n.current = exactMatch && n.sessionId === currentId;
     n.latest = !exactMatch && n.sessionId === newestFile;
@@ -969,15 +1058,10 @@ function help() {
     return;
   }
 
-  // A real terminal on both ends is what lets us hand the terminal over — to the picker
-  // below, or straight to a `claude -r` for `..`.
-  const canInteract = Boolean(process.stdout.isTTY && process.stdin.isTTY);
-
-  // `..` / -p: go up one fork level. The anchor is the session we're running inside when
-  // it belongs to this project, else the most recently written one — the same precedence
-  // as the current/latest markers above, so `..` means "up from where I just was".
+  // `..` / -p: go up one fork level. Only the cases the fast path above declined reach
+  // here — a root, or a parent transcript that lives in another project — plus `--json`
+  // and `<n>`, which returned already. So this is now the diagnostic path.
   if (opts.parent) {
-    const anchorId = exactMatch ? currentId : newestFile;
     const anchor = nodes.find((n) => n.sessionId === anchorId);
     if (!anchor) {
       process.stderr.write('branch-graph: could not determine the most recent branch\n');
@@ -995,14 +1079,7 @@ function help() {
       }
       process.exit(1);
     }
-    const parentId = anchor.effectiveParent;
-    // Launch only where we can own the terminal. Inside Claude Code's piped `!` a nested
-    // `claude` would be wrong, so print the paste-able line instead.
-    const canLaunch = canInteract && !process.env.CLAUDECODE &&
-      opts.interactive !== false && !opts.list;
-    if (canLaunch) launchResume(parentId); // never returns
-    console.log(resumeLine(parentId));
-    console.log(dim(`(other terminal: claude -r ${parentId})`));
+    goToParent(anchor.effectiveParent, opts, canInteract);
     return;
   }
 
