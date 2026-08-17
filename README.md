@@ -82,7 +82,7 @@ need to track capture state per payment intent and make the refund
 handler idempotent so replayed webhook events don't trigger duplicate
 …
 
-↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: quit
+↑/↓/hover: navigate   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit
 ```
 
 Row 5 is the current selection — shown in reverse video in a real terminal (a
@@ -116,10 +116,49 @@ panel below.
   it does nothing.
 - The detail panel shows the focused branch's session id, fork point, full last-active
   time, and more of its starting prompt.
+- **s** or **/** — search (see below).
 - **Enter** or **left-click** a branch — **launches a Claude session on it**
   (`claude -r <sessionId>`), handing the terminal over. This is the key advantage of the
   separate terminal: the picker switches you to the branch directly, no copy-paste.
 - **Esc** — quit.
+
+### Search
+
+Press **s** (or **/**) and type. The tree filters as you type, and each match keeps
+its parent branches so you can still see where it hangs off:
+
+```
+Branches in my-project
+search: paypal   3 of 8
+
+2  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM
+6  └─● 7f2e8c15  paypal-webhooks  15/07  5:08PM
+7     └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
+
+type to filter   ↑/↓: select   Enter: accept   Esc: cancel
+```
+
+Only rows 6 and 7 actually match; row 2 is kept because it's their parent, so the
+match still has a place in the tree. Note the connectors are redrawn for the smaller
+tree — row 6 becomes a `└─` once its siblings are gone.
+
+- **↑/↓** still move the selection while you type — every other printable key is text,
+  so `j`, `k`, `p` and `q` type instead of navigating.
+- **Backspace** deletes, **Ctrl-U** clears the query.
+- **Enter** accepts the filter and drops you back into normal navigation over the
+  matching rows. Resuming a branch then takes a second **Enter**, so the handoff to
+  `claude` is always deliberate.
+- **Esc** unwinds one layer per press: cancel typing → clear the filter → quit. A
+  search is never lost to a stray keypress.
+
+Rows keep their original numbers while filtered, so a row still matches
+`branch-graph <n>`.
+
+Matching runs entirely locally — no tokens, no network — over branch names, titles,
+first prompts, and session ids (not full transcript bodies). It is case-insensitive,
+and word order doesn't matter: `auth flow` finds *"flow for authentication"*. Against
+names and titles you can also skip letters, so `lcns` finds *"Choose license for
+distribution"*; first prompts match on text you actually typed.
 
 It auto-activates whenever it's attached to a real terminal. Force it with
 `-i` / `--interactive`, or disable it with `--no-interactive`. Piped output, `--json`,

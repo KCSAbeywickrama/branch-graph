@@ -242,6 +242,93 @@ function flatten(forest) {
   return out;
 }
 
+// ---------- search ----------
+//
+// Matching is entirely offline: no network, no transcript re-read. The haystack is
+// the text scanSession already kept per node, so a query costs a string scan.
+
+// fzf-style abbreviation matching, but span-limited: the matched characters must
+// fall inside a window a few times the needle's own length. Unbounded, a 4-char
+// subsequence is findable in almost any sentence ("lcns" hit two thirds of a real
+// branch list), which is the difference between a filter and a shrug. Both operands
+// must already be lowercased.
+function subsequenceMatch(hay, needle) {
+  if (!needle) return true;
+  const maxSpan = Math.max(needle.length * 3, needle.length + 4);
+  const first = needle[0];
+  // Try every possible start so a tight match later in the string still counts,
+  // rather than only the greedy-from-the-left one.
+  for (let start = 0; start <= hay.length - needle.length; start++) {
+    if (hay[start] !== first) continue;
+    let i = 1;
+    let j = start + 1;
+    for (; j < hay.length && i < needle.length && j - start < maxSpan; j++) {
+      if (hay[j] === needle[i]) i++;
+    }
+    if (i === needle.length) return true;
+  }
+  return false;
+}
+
+// Two haystacks, because gap-tolerant matching does not survive long text: even
+// span-limited, searching a 4000-char prompt (promptFull's cap) that way turns up
+// coincidences. Abbreviations are matched only against the SHORT identity fields,
+// while the first prompt is searched by literal substring — precise at any length.
+//   short: label/heading/name/title, deduped — where "athflw" -> "auth flow" is
+//          the point. Deduping matters: label usually equals heading, and a
+//          repeated string doubles the room for a coincidental subsequence.
+//   full:  short + first prompt + session id — substring only. Session ids live
+//          here alone: a subsequence over hex is noise, and an id is pasted exactly.
+// Cached off to the side rather than on the node, so nothing leaks into --json.
+const hayCache = new WeakMap();
+function nodeHaystacks(n) {
+  let hay = hayCache.get(n);
+  if (hay === undefined) {
+    const short = [...new Set([n.label, n.heading, n.name, n.title].filter(Boolean))]
+      .join('   ').toLowerCase();
+    const full = [short, n.promptFull || '', n.sessionId].join('   ').toLowerCase();
+    hay = { short, full };
+    hayCache.set(n, hay);
+  }
+  return hay;
+}
+
+// Every token must hit somewhere, so word order doesn't matter: "auth flow" finds
+// "flow for authentication".
+function matchNode(n, tokens) {
+  const hay = nodeHaystacks(n);
+  return tokens.every((t) => hay.full.includes(t) || subsequenceMatch(hay.short, t));
+}
+
+// Rows matching `query`, plus each match's ancestors so the tree still reads as a
+// tree. The pruned set is re-flattened for correct connectors/prefixes, then the
+// original 1-based indices are restored — they line up with the `branch-graph <n>`
+// CLI arg, so rows must keep their real numbers rather than being renumbered.
+function filterRows(allRows, query) {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return allRows;
+  const byId = new Map(allRows.map((r) => [r.node.sessionId, r.node]));
+  const keep = new Set();
+  for (const r of allRows) {
+    if (!matchNode(r.node, tokens)) continue;
+    // Walk up so a matched leaf keeps the branch it hangs off. Stopping at an
+    // already-kept node is safe: we always add a whole chain at once.
+    for (let n = r.node; n && !keep.has(n.sessionId); n = byId.get(n.effectiveParent)) {
+      keep.add(n.sessionId);
+    }
+  }
+  if (keep.size === 0) return [];
+  // Ancestors of every match are kept too, so buildForest recomputes exactly the
+  // effectiveParent values it already set — the subset can never orphan a node.
+  // Dropping that invariant would silently break p/← parent navigation.
+  const rows = flatten(buildForest(allRows
+    .filter((r) => keep.has(r.node.sessionId))
+    .map((r) => r.node)));
+  const origIndex = new Map(allRows.map((r) => [r.node.sessionId, r.index]));
+  for (const r of rows) r.index = origIndex.get(r.node.sessionId);
+  return rows;
+}
+
 function resumeLine(id) { return `/resume ${id}`; }
 
 // Hand the terminal over to a Claude session on `sessionId`. Never returns. Callers
@@ -389,24 +476,59 @@ function shortTime(ms) {
     `${h}:${p2(d.getMinutes())}${h24 < 12 ? 'AM' : 'PM'}`;
 }
 
-function runInteractive(rows, ctx) {
+function runInteractive(allRows, ctx) {
   const out = process.stdout;
   const inp = process.stdin;
-  const idxW = String(rows.length).length;
+  // Width of the index column stays keyed to the FULL tree so it doesn't jitter as
+  // rows are filtered away while typing.
+  const idxW = String(allRows.length).length;
+  let rows = allRows;   // current view: the whole tree, or the search-filtered subset
   let selected = rows.findIndex((r) => r.node.current || r.node.latest);
   if (selected < 0) selected = 0;
   let scrollTop = 0;
   let rowYMap = []; // 1-based screen line -> row index, for mouse hit-testing
-  const rowBySessionId = new Map(rows.map((r, i) => [r.node.sessionId, i]));
-  // Row indices of each node's children. flatten() visits children in the mtime order
-  // buildForest sorted them into, so the last entry is always the most recent child.
-  const childRows = new Map();
-  rows.forEach((r, i) => {
-    const p = r.node.effectiveParent;
-    if (!p) return;
-    const a = childRows.get(p);
-    if (a) a.push(i); else childRows.set(p, [i]);
-  });
+  let searchMode = false; // true while typing a query
+  let query = '';
+  // Both maps hold ROW INDICES, so they are invalid the moment `rows` changes —
+  // setView() rebuilds them together with the view.
+  let rowBySessionId = new Map();
+  let childRows = new Map();
+  function reindex() {
+    rowBySessionId = new Map(rows.map((r, i) => [r.node.sessionId, i]));
+    // Row indices of each node's children. flatten() visits children in the mtime order
+    // buildForest sorted them into, so the last entry is always the most recent child.
+    childRows = new Map();
+    rows.forEach((r, i) => {
+      const p = r.node.effectiveParent;
+      if (!p) return;
+      const a = childRows.get(p);
+      if (a) a.push(i); else childRows.set(p, [i]);
+    });
+  }
+  reindex();
+
+  // Swap in a new view, keeping the highlight on the same branch where possible so
+  // the selection doesn't jump around as the filter narrows.
+  function setView(next) {
+    const keepId = rows.length ? rows[selected].node.sessionId : null;
+    rows = next;
+    reindex();
+    const at = keepId != null ? rowBySessionId.get(keepId) : undefined;
+    selected = at != null ? at : 0;
+    scrollTop = 0;
+  }
+  function applyQuery(q) {
+    query = q;
+    setView(filterRows(allRows, query));
+    render();
+  }
+  // clear:true also drops the filter; otherwise just leaves typing mode.
+  function exitSearch(clear) {
+    searchMode = false;
+    if (clear && query) applyQuery('');
+    else render();
+  }
+
   let inputBuf = ''; // carries a partial escape sequence between data events
   let escTimer = null;
   const w = (s) => out.write(s);
@@ -427,15 +549,25 @@ function runInteractive(rows, ctx) {
     restore();
     launchResume(node.sessionId);
   }
+  // A search can filter every row away, so nothing may read rows[selected] blindly.
+  function current() { return rows.length ? rows[selected] : null; }
   function move(delta) {
+    if (!rows.length) return;
     selected = Math.max(0, Math.min(rows.length - 1, selected + delta));
+    render();
+  }
+  function jumpTo(i) {
+    if (!rows.length) return;
+    selected = Math.max(0, Math.min(rows.length - 1, i));
     render();
   }
   // Jump to the branch this one forked from. effectiveParent is non-null only when that
   // session is in this project, so it always resolves to a row; roots and forks whose
   // parent lives elsewhere have nowhere to go.
   function selectParent() {
-    const pid = rows[selected].node.effectiveParent;
+    const row = current();
+    if (!row) return;
+    const pid = row.node.effectiveParent;
     if (!pid) return;
     const i = rowBySessionId.get(pid);
     if (i == null || i === selected) return;
@@ -444,7 +576,9 @@ function runInteractive(rows, ctx) {
   }
   // Descend to this branch's most recent child; leaves have nowhere to go.
   function selectChild() {
-    const kids = childRows.get(rows[selected].node.sessionId);
+    const row = current();
+    if (!row) return;
+    const kids = childRows.get(row.node.sessionId);
     if (!kids) return;
     selected = kids[kids.length - 1];
     render();
@@ -499,9 +633,13 @@ function runInteractive(rows, ctx) {
   function render() {
     const cols = out.columns || 80;
     const term = out.rows || 24;
-    const node = rows[selected].node;
-    const detail = buildDetail(node, cols);
-    const chromeTop = 2;                    // header + blank
+    const row = current();
+    // With no matches there is no branch to describe, so the detail panel collapses
+    // to a single hint line rather than reading rows[selected] off an empty view.
+    const detail = row ? buildDetail(row.node, cols)
+      : [dim('─'.repeat(Math.min(cols, 80))), dim('no branch matches this search')];
+    const searchLine = searchMode || query;      // shown between header and rows
+    const chromeTop = 2 + (searchLine ? 1 : 0);  // header + [search] + blank
     const chromeBottom = 1 + detail.length + 1 + 1; // blank + detail + blank + footer
     let viewport = term - chromeTop - chromeBottom;
     if (viewport < 3) viewport = 3;
@@ -516,9 +654,16 @@ function runInteractive(rows, ctx) {
     const put = (s) => { buf += s + '\x1b[K\r\n'; };
     put(bold(`Branches in ${ctx.projectName}`) +
       (rows.length > viewport ? dim(`  (${selected + 1}/${rows.length})`) : ''));
+    if (searchLine) {
+      const count = rows.length === allRows.length ? ''
+        : rows.length === 0 ? '  no matches'
+          : `  ${rows.length} of ${allRows.length}`;
+      // A block cursor while typing, so it's obvious the keyboard is going here.
+      put(cyan('search: ') + query + (searchMode ? '\x1b[7m \x1b[0m' : '') + dim(count));
+    }
     put('');
     rowYMap = [];
-    let y = 3;
+    let y = chromeTop + 1;
     for (let i = scrollTop; i < end; i++) {
       rowYMap[y] = i;
       put(rowText(rows[i], cols, i === selected));
@@ -531,7 +676,12 @@ function runInteractive(rows, ctx) {
     if (ctx.elsewhere) {
       put(dim(`current session ${ctx.currentId.slice(0, 8)} is in another project`));
     }
-    buf += dim('↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: quit') + '\x1b[K';
+    buf += dim(searchMode
+      ? 'type to filter   ↑/↓: select   Enter: accept   Esc: cancel'
+      : query
+        ? '↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: clear search'
+        : '↑/↓/hover: navigate   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit'
+    ) + '\x1b[K';
     buf += '\x1b[J'; // clear anything left below from a previous taller frame
     w(buf);
   }
@@ -552,11 +702,15 @@ function runInteractive(rows, ctx) {
   }
 
   // A lone ESC that never grows into a sequence within the timeout = the Escape key.
+  // Escape unwinds one layer at a time: typing → filter → quit. Only a bare picker
+  // with no search in play exits, so a search can never be lost to a stray keypress.
   function flushPending() {
     escTimer = null;
     const p = inputBuf; inputBuf = '';
-    if (p === '\x1b') quit(0); // Escape key → quit
-    // otherwise a stalled/garbled partial sequence: drop it
+    if (p !== '\x1b') return; // stalled/garbled partial sequence: drop it
+    if (searchMode) exitSearch(true);
+    else if (query) applyQuery('');
+    else quit(0);
   }
   function armFlush() {
     if (escTimer) clearTimeout(escTimer);
@@ -578,12 +732,27 @@ function runInteractive(rows, ctx) {
     while (i < buf.length) {
       const ch = buf[i];
       if (ch !== '\x1b') {
-        if (ch === '\r' || ch === '\n') { resume(rows[selected].node); return; }
+        // Search mode swallows every printable key, so j/k/p/q/g type instead of
+        // navigating. Arrows (handled below) still move the selection while typing.
+        if (searchMode) {
+          if (ch === '\x03') { quit(0); return; }              // Ctrl-C always quits
+          // Accept, keeping the filter — but never onto an empty view, which would
+          // strand the picker with nothing to select. Keep typing instead.
+          else if (ch === '\r' || ch === '\n') { if (rows.length) exitSearch(false); }
+          else if (ch === '\x7f' || ch === '\b') applyQuery(query.slice(0, -1));
+          else if (ch === '\x15') applyQuery('');              // Ctrl-U: clear query
+          else if (ch >= ' ') applyQuery(query + ch);          // ignore other controls
+          i++; continue;
+        }
+        if (ch === '\r' || ch === '\n') {
+          const row = current();
+          if (row) { resume(row.node); return; }
+        } else if (ch === 's' || ch === '/') { searchMode = true; render(); }
         else if (ch === 'k') move(-1);
         else if (ch === 'j') move(1);
         else if (ch === 'p') selectParent();
-        else if (ch === 'g') { selected = 0; render(); }
-        else if (ch === 'G') { selected = rows.length - 1; render(); }
+        else if (ch === 'g') jumpTo(0);
+        else if (ch === 'G') jumpTo(rows.length - 1);
         else if (ch === 'q' || ch === '\x03') { quit(0); return; }
         i++; continue;
       }
@@ -599,8 +768,8 @@ function runInteractive(rows, ctx) {
           const f = seq[seq.length - 1];
           if (f === 'A') move(-1);
           else if (f === 'B') move(1);
-          else if (f === 'H') { selected = 0; render(); }
-          else if (f === 'F') { selected = rows.length - 1; render(); }
+          else if (f === 'H') jumpTo(0);
+          else if (f === 'F') jumpTo(rows.length - 1);
           else if (f === 'D') selectParent();
           else if (f === 'C') selectChild();
           // any other CSI (focus events, etc.): ignore rather than quit
@@ -612,13 +781,16 @@ function runInteractive(rows, ctx) {
         const f = rest[2];
         if (f === 'A') move(-1);
         else if (f === 'B') move(1);
-        else if (f === 'H') { selected = 0; render(); }
-        else if (f === 'F') { selected = rows.length - 1; render(); }
+        else if (f === 'H') jumpTo(0);
+        else if (f === 'F') jumpTo(rows.length - 1);
         else if (f === 'D') selectParent();
         else if (f === 'C') selectChild();
         i += 3; continue;
       }
-      quit(0); return; // ESC + other byte (Alt-combo, etc.) → quit, as before
+      // ESC + other byte (Alt-combo, etc.). Mid-typing that must not kill the picker
+      // and lose the query, so swallow it; outside search mode it quits, as before.
+      if (searchMode) { i += 2; continue; }
+      quit(0); return;
     }
   }
 
@@ -660,6 +832,18 @@ function help() {
     'In a real terminal it opens an interactive picker (↑/↓ or mouse to navigate, p/← to',
     'jump to the parent branch and → to its most recent child, Enter/click to resume that',
     'branch). Piped or inside Claude Code it prints a list.',
+    '',
+    'Search (picker only):',
+    '  s or /             start typing a query; the tree filters as you type, keeping',
+    '                     each match\'s parent branches for context',
+    '  Enter              accept the filter and go back to navigating it',
+    '  Esc                cancel typing / clear the filter / quit (one layer per press)',
+    '',
+    '  Matching runs locally over branch names, titles, first prompts and session ids',
+    '  (not full transcript bodies). It is case-insensitive and word order does not',
+    '  matter, so "auth flow" finds "flow for authentication". Against names and titles',
+    '  you can also skip letters — "lcns" finds "Choose license" — while first prompts',
+    '  match on text you actually typed.',
     '',
     'Flags:',
     '  .., -p, --parent   jump to the parent of the most recent branch: launches',
