@@ -12,7 +12,9 @@
 // Usage (inside Claude Code, zero tokens):
 //   !branch-graph            list the fork tree with a /resume line per branch
 //   !branch-graph <n>        print only the /resume line for branch number <n>
+//   !branch-graph ..         jump to the parent of the most recent branch
 // Flags:
+//   .., -p, --parent         go up one fork level from the most recent branch
 //   --project <path>         use a specific ~/.claude/projects/<dir> (or a cwd)
 //   --json                   machine-readable output
 //   --list                   force list output (default when no <n>)
@@ -26,10 +28,12 @@ const readline = require('readline');
 // ---------- args ----------
 function parseArgs(argv) {
   const opts = { project: null, json: false, list: false, help: false, index: null,
-    color: null, interactive: null, debugMouse: false };
+    color: null, interactive: null, debugMouse: false, parent: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
+    // `..` reads as "up one level" like `cd ..`, and unlike `^` no shell mangles it.
+    else if (a === '..' || a === '-p' || a === '--parent' || a === '--up') opts.parent = true;
     else if (a === '--debug-mouse') opts.debugMouse = true;
     else if (a === '--json') opts.json = true;
     else if (a === '--list') opts.list = true;
@@ -240,6 +244,22 @@ function flatten(forest) {
 
 function resumeLine(id) { return `/resume ${id}`; }
 
+// Hand the terminal over to a Claude session on `sessionId`. Never returns. Callers
+// holding terminal state (the picker) must restore() before calling.
+function launchResume(sessionId) {
+  const { spawnSync } = require('child_process');
+  const res = spawnSync('claude', ['-r', sessionId], { stdio: 'inherit' });
+  if (res.error) {
+    // `claude` missing or not executable — fall back to the paste-able line rather
+    // than exiting silently as if the switch had happened.
+    process.stderr.write(`branch-graph: could not run \`claude\` ` +
+      `(${res.error.code || res.error.message})\n`);
+    console.log(resumeLine(sessionId));
+    process.exit(1);
+  }
+  process.exit(res.status == null ? 0 : res.status);
+}
+
 function renderList(rows, projectName, meta) {
   const idxW = String(rows.length).length;
   // label column width for alignment
@@ -377,6 +397,16 @@ function runInteractive(rows, ctx) {
   if (selected < 0) selected = 0;
   let scrollTop = 0;
   let rowYMap = []; // 1-based screen line -> row index, for mouse hit-testing
+  const rowBySessionId = new Map(rows.map((r, i) => [r.node.sessionId, i]));
+  // Row indices of each node's children. flatten() visits children in the mtime order
+  // buildForest sorted them into, so the last entry is always the most recent child.
+  const childRows = new Map();
+  rows.forEach((r, i) => {
+    const p = r.node.effectiveParent;
+    if (!p) return;
+    const a = childRows.get(p);
+    if (a) a.push(i); else childRows.set(p, [i]);
+  });
   let inputBuf = ''; // carries a partial escape sequence between data events
   let escTimer = null;
   const w = (s) => out.write(s);
@@ -395,12 +425,28 @@ function runInteractive(rows, ctx) {
   function quit(code) { restore(); process.exit(code); }
   function resume(node) {
     restore();
-    const { spawnSync } = require('child_process');
-    const res = spawnSync('claude', ['-r', node.sessionId], { stdio: 'inherit' });
-    process.exit(res.status == null ? 0 : res.status);
+    launchResume(node.sessionId);
   }
   function move(delta) {
     selected = Math.max(0, Math.min(rows.length - 1, selected + delta));
+    render();
+  }
+  // Jump to the branch this one forked from. effectiveParent is non-null only when that
+  // session is in this project, so it always resolves to a row; roots and forks whose
+  // parent lives elsewhere have nowhere to go.
+  function selectParent() {
+    const pid = rows[selected].node.effectiveParent;
+    if (!pid) return;
+    const i = rowBySessionId.get(pid);
+    if (i == null || i === selected) return;
+    selected = i;
+    render();
+  }
+  // Descend to this branch's most recent child; leaves have nowhere to go.
+  function selectChild() {
+    const kids = childRows.get(rows[selected].node.sessionId);
+    if (!kids) return;
+    selected = kids[kids.length - 1];
     render();
   }
 
@@ -485,7 +531,7 @@ function runInteractive(rows, ctx) {
     if (ctx.elsewhere) {
       put(dim(`current session ${ctx.currentId.slice(0, 8)} is in another project`));
     }
-    buf += dim('↑/↓ or hover: navigate   Enter/click: resume   Esc: quit') + '\x1b[K';
+    buf += dim('↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: quit') + '\x1b[K';
     buf += '\x1b[J'; // clear anything left below from a previous taller frame
     w(buf);
   }
@@ -535,6 +581,7 @@ function runInteractive(rows, ctx) {
         if (ch === '\r' || ch === '\n') { resume(rows[selected].node); return; }
         else if (ch === 'k') move(-1);
         else if (ch === 'j') move(1);
+        else if (ch === 'p') selectParent();
         else if (ch === 'g') { selected = 0; render(); }
         else if (ch === 'G') { selected = rows.length - 1; render(); }
         else if (ch === 'q' || ch === '\x03') { quit(0); return; }
@@ -554,6 +601,8 @@ function runInteractive(rows, ctx) {
           else if (f === 'B') move(1);
           else if (f === 'H') { selected = 0; render(); }
           else if (f === 'F') { selected = rows.length - 1; render(); }
+          else if (f === 'D') selectParent();
+          else if (f === 'C') selectChild();
           // any other CSI (focus events, etc.): ignore rather than quit
         }
         i += seq.length; continue;
@@ -565,6 +614,8 @@ function runInteractive(rows, ctx) {
         else if (f === 'B') move(1);
         else if (f === 'H') { selected = 0; render(); }
         else if (f === 'F') { selected = rows.length - 1; render(); }
+        else if (f === 'D') selectParent();
+        else if (f === 'C') selectChild();
         i += 3; continue;
       }
       quit(0); return; // ESC + other byte (Alt-combo, etc.) → quit, as before
@@ -604,11 +655,16 @@ function help() {
     'Usage:',
     '  !branch-graph            list the fork tree with a /resume line per branch',
     '  !branch-graph <n>        print only the /resume line for branch number <n>',
+    '  !branch-graph ..         go up one fork level from the most recent branch',
     '',
-    'In a real terminal it opens an interactive picker (↑/↓ or mouse to navigate,',
-    'Enter/click to resume that branch). Piped or inside Claude Code it prints a list.',
+    'In a real terminal it opens an interactive picker (↑/↓ or mouse to navigate, p/← to',
+    'jump to the parent branch and → to its most recent child, Enter/click to resume that',
+    'branch). Piped or inside Claude Code it prints a list.',
     '',
     'Flags:',
+    '  .., -p, --parent   jump to the parent of the most recent branch: launches',
+    '                     `claude -r` in a terminal, prints /resume when piped or',
+    '                     inside Claude Code. Takes precedence over the picker.',
     '  -i, --interactive  force the interactive picker (requires a terminal)',
     '  --no-interactive   force plain list output',
     '  --project <path>   a working dir or ~/.claude/projects/<dir> to inspect',
@@ -706,8 +762,44 @@ function help() {
     return;
   }
 
-  // Interactive TUI: only in a real terminal, never inside Claude Code's piped `!`.
+  // A real terminal on both ends is what lets us hand the terminal over — to the picker
+  // below, or straight to a `claude -r` for `..`.
   const canInteract = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+
+  // `..` / -p: go up one fork level. The anchor is the session we're running inside when
+  // it belongs to this project, else the most recently written one — the same precedence
+  // as the current/latest markers above, so `..` means "up from where I just was".
+  if (opts.parent) {
+    const anchorId = exactMatch ? currentId : newestFile;
+    const anchor = nodes.find((n) => n.sessionId === anchorId);
+    if (!anchor) {
+      process.stderr.write('branch-graph: could not determine the most recent branch\n');
+      process.exit(1);
+    }
+    // buildForest() nulls effectiveParent both for a true root and for a fork whose
+    // parent transcript lives elsewhere; anchor.parent is what tells them apart.
+    if (!anchor.effectiveParent) {
+      if (anchor.parent) {
+        process.stderr.write(`branch-graph: parent ${anchor.parent.slice(0, 8)} of ` +
+          `${anchorId.slice(0, 8)} has no transcript in this project\n`);
+      } else {
+        process.stderr.write(`branch-graph: most recent branch ${anchorId.slice(0, 8)} ` +
+          `(${truncate(anchor.label, 40)}) is a root — no parent branch\n`);
+      }
+      process.exit(1);
+    }
+    const parentId = anchor.effectiveParent;
+    // Launch only where we can own the terminal. Inside Claude Code's piped `!` a nested
+    // `claude` would be wrong, so print the paste-able line instead.
+    const canLaunch = canInteract && !process.env.CLAUDECODE &&
+      opts.interactive !== false && !opts.list;
+    if (canLaunch) launchResume(parentId); // never returns
+    console.log(resumeLine(parentId));
+    console.log(dim(`(other terminal: claude -r ${parentId})`));
+    return;
+  }
+
+  // Interactive TUI: only in a real terminal, never inside Claude Code's piped `!`.
   if (opts.interactive === true && !canInteract) {
     process.stderr.write('branch-graph: --interactive requires a terminal (TTY)\n');
     process.exit(2);

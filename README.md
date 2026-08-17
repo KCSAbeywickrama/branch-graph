@@ -82,7 +82,7 @@ need to track capture state per payment intent and make the refund
 handler idempotent so replayed webhook events don't trigger duplicate
 …
 
-↑/↓ or hover: navigate   Enter/click: resume   Esc: quit
+↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: quit
 ```
 
 Row 5 is the current selection — shown in reverse video in a real terminal (a
@@ -110,6 +110,10 @@ inside a session of this project. The full timestamp for the selected row is in 
 panel below.
 
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
+- **p** or **←** — jump the selection to the branch this one was forked from (its
+  parent). On a root branch it does nothing.
+- **→** — descend to this branch's most recent child. On a branch with no forks off it,
+  it does nothing.
 - The detail panel shows the focused branch's session id, fork point, full last-active
   time, and more of its starting prompt.
 - **Enter** or **left-click** a branch — **launches a Claude session on it**
@@ -125,10 +129,30 @@ It auto-activates whenever it's attached to a real terminal. Force it with
 > text-selection is intercepted — hold **Option** (iTerm2) or **Shift** (most terminals)
 > to select text instead.
 
+## Going up one level: `..`
+
+The most common move — back up one fork level from the branch you were just on — skips the
+picker entirely:
+
+```sh
+cbg ..          # or: cbg -p, cbg --parent
+```
+
+It reads as "up one level" exactly like `cd ..`, and no shell mangles it. In a terminal it
+launches `claude -r` on the parent straight away, handing the terminal over, same as
+pressing Enter in the picker. Piped, or inside Claude Code, it prints the `/resume <id>`
+line instead — a nested `claude` would be the wrong thing there.
+
+The branch it goes up *from* is the session you're inside when that session belongs to the
+project being shown, otherwise the most recently written one — the same anchor the
+`← current` and `(most recent)` markers use. If that branch is a tree root, or its parent
+transcript isn't in this project, `..` says so and exits non-zero rather than guessing.
+
 ### Flags
 
 | Flag | Description |
 | --- | --- |
+| `..`, `-p`, `--parent` | Go up one fork level from the most recent branch, with no picker and no row number. Takes precedence over the picker. |
 | `-i`, `--interactive` | Force the interactive picker (requires a terminal). |
 | `--no-interactive` | Force plain list output. |
 | `--project <path>` | Inspect a different project: pass a working dir, or a `~/.claude/projects/<dir>` path. |
@@ -146,6 +170,7 @@ directly in the conversation, where Claude reads and interprets it, which does c
 ```
 !branch-graph        # list the fork tree, with a /resume line per branch
 !branch-graph 2      # print only the /resume line for branch #2
+!branch-graph ..     # print the /resume line for the parent of the most recent branch
 !cbg                 # short alias, same behavior
 ```
 
