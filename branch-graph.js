@@ -304,20 +304,26 @@ function matchNode(n, tokens) {
 // tree. The pruned set is re-flattened for correct connectors/prefixes, then the
 // original 1-based indices are restored — they line up with the `branch-graph <n>`
 // CLI arg, so rows must keep their real numbers rather than being renumbered.
+// Each returned row carries `match`: true for a real hit, false for a row kept only
+// as context. Rows in the unfiltered list have no `match` property at all, so
+// `match !== false` reads as "not a context row" in both cases.
 function filterRows(allRows, query) {
   const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!tokens.length) return allRows;
   const byId = new Map(allRows.map((r) => [r.node.sessionId, r.node]));
-  const keep = new Set();
+  const matched = new Set();
   for (const r of allRows) {
-    if (!matchNode(r.node, tokens)) continue;
+    if (matchNode(r.node, tokens)) matched.add(r.node.sessionId);
+  }
+  if (matched.size === 0) return [];
+  const keep = new Set();
+  for (const id of matched) {
     // Walk up so a matched leaf keeps the branch it hangs off. Stopping at an
     // already-kept node is safe: we always add a whole chain at once.
-    for (let n = r.node; n && !keep.has(n.sessionId); n = byId.get(n.effectiveParent)) {
+    for (let n = byId.get(id); n && !keep.has(n.sessionId); n = byId.get(n.effectiveParent)) {
       keep.add(n.sessionId);
     }
   }
-  if (keep.size === 0) return [];
   // Ancestors of every match are kept too, so buildForest recomputes exactly the
   // effectiveParent values it already set — the subset can never orphan a node.
   // Dropping that invariant would silently break p/← parent navigation.
@@ -325,7 +331,10 @@ function filterRows(allRows, query) {
     .filter((r) => keep.has(r.node.sessionId))
     .map((r) => r.node)));
   const origIndex = new Map(allRows.map((r) => [r.node.sessionId, r.index]));
-  for (const r of rows) r.index = origIndex.get(r.node.sessionId);
+  for (const r of rows) {
+    r.index = origIndex.get(r.node.sessionId);
+    r.match = matched.has(r.node.sessionId);
+  }
   return rows;
 }
 
@@ -507,14 +516,20 @@ function runInteractive(allRows, ctx) {
   }
   reindex();
 
-  // Swap in a new view, keeping the highlight on the same branch where possible so
-  // the selection doesn't jump around as the filter narrows.
+  // Swap in a new view. The highlight stays put only if that branch is still a real
+  // match — otherwise it lands on the first hit. Falling back to row 0 instead put
+  // the selection on the topmost context ancestor, which reads as the search having
+  // picked the wrong branch.
   function setView(next) {
     const keepId = rows.length ? rows[selected].node.sessionId : null;
     rows = next;
     reindex();
     const at = keepId != null ? rowBySessionId.get(keepId) : undefined;
-    selected = at != null ? at : 0;
+    if (at != null && rows[at].match !== false) selected = at;
+    else {
+      const firstHit = rows.findIndex((r) => r.match !== false);
+      selected = firstHit >= 0 ? firstHit : 0;
+    }
     scrollTop = 0;
   }
   function applyQuery(q) {
@@ -599,6 +614,10 @@ function runInteractive(allRows, ctx) {
     let text = `${fixed}${label}${tag}`;
     if (text.length > cols) text = text.slice(0, cols);
     if (isSel) return '\x1b[7m' + text.padEnd(cols) + '\x1b[0m';
+    // A search context row — kept only to show where a match hangs off, not a hit
+    // itself. Dim the whole line so the actual matches stand out; the usual per-part
+    // coloring would just compete for attention.
+    if (r.match === false) return dim(text);
     // non-selected: colorize glyph + id; bold a title/name, plain a first prompt
     const glyph = n.current ? green('●') : n.latest ? yellow('●') : '●';
     const shownLabel = n.strong ? bold(label) : label;
@@ -655,9 +674,12 @@ function runInteractive(allRows, ctx) {
     put(bold(`Branches in ${ctx.projectName}`) +
       (rows.length > viewport ? dim(`  (${selected + 1}/${rows.length})`) : ''));
     if (searchLine) {
-      const count = rows.length === allRows.length ? ''
-        : rows.length === 0 ? '  no matches'
-          : `  ${rows.length} of ${allRows.length}`;
+      // Count hits, not rows: the view also carries dimmed context ancestors, and
+      // reporting those as matches overstates what was found.
+      const hits = rows.reduce((k, r) => k + (r.match === false ? 0 : 1), 0);
+      const count = !query ? ''
+        : hits === 0 ? '  no matches'
+          : `  ${hits} of ${allRows.length}`;
       // A block cursor while typing, so it's obvious the keyboard is going here.
       put(cyan('search: ') + query + (searchMode ? '\x1b[7m \x1b[0m' : '') + dim(count));
     }
@@ -835,7 +857,8 @@ function help() {
     '',
     'Search (picker only):',
     '  s or /             start typing a query; the tree filters as you type, keeping',
-    '                     each match\'s parent branches for context',
+    '                     each match\'s parent branches greyed out for context. The',
+    '                     selection lands on the first real match.',
     '  Enter              accept the filter and go back to navigating it',
     '  Esc                cancel typing / clear the filter / quit (one layer per press)',
     '',

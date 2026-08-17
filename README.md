@@ -125,22 +125,25 @@ panel below.
 ### Search
 
 Press **s** (or **/**) and type. The tree filters as you type, and each match keeps
-its parent branches so you can still see where it hangs off:
+its parent branches — greyed out — so you can still see where it hangs off:
 
 ```
 Branches in my-project
-search: paypal   3 of 8
+search: paypal   2 of 8
 
-2  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM
-6  └─● 7f2e8c15  paypal-webhooks  15/07  5:08PM
+2  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM      ← grey (context only)
+6  └─● 7f2e8c15  paypal-webhooks  15/07  5:08PM               ← selected
 7     └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
-
-type to filter   ↑/↓: select   Enter: accept   Esc: cancel
 ```
 
-Only rows 6 and 7 actually match; row 2 is kept because it's their parent, so the
-match still has a place in the tree. Note the connectors are redrawn for the smaller
-tree — row 6 becomes a `└─` once its siblings are gone.
+Only rows 6 and 7 match — the count says **2 of 8**, not 3, because row 2 is kept
+purely as context: it's their parent, so the matches still have a place in the tree.
+Context rows are **greyed out** so the real hits stand out, and the connectors are
+redrawn for the smaller tree — row 6 becomes a `└─` once its siblings are gone.
+
+The selection starts on the **first actual match** (row 6), never on a grey context
+row, and stays put as you keep typing for as long as that branch still matches.
+Context rows are still fully selectable and resumable if you want one.
 
 - **↑/↓** still move the selection while you type — every other printable key is text,
   so `j`, `k`, `p` and `q` type instead of navigating.
