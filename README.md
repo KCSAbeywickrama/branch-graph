@@ -29,10 +29,8 @@ Requires a Rust toolchain (1.70 or newer — [rustup.rs](https://rustup.rs)). No
 needed at runtime: the build produces a single binary and Node is not involved.
 
 ```sh
-./install.sh                       # builds, then installs `branch-graph` into ~/.local/bin
+./install.sh                       # builds, then symlinks `branch-graph` into ~/.local/bin
 BINDIR=/usr/local/bin ./install.sh # or choose another bin dir
-LINK=1 ./install.sh                # symlink target/release instead of copying, so a later
-                                   # `cargo build --release` updates the installed tool
 ```
 
 Or build it yourself and put `target/release/branch-graph` wherever you like:
@@ -43,6 +41,10 @@ cargo build --release
 
 This also installs `cbg`, a short alias for `branch-graph` — use whichever you prefer,
 they're interchangeable everywhere in this README.
+
+Both are symlinks into `target/release`, so `cargo build --release` updates the installed
+command in place, with no reinstall while you're working on it. (`cargo clean` removes
+what they point at, so rebuild or re-run `./install.sh` after one.)
 
 If the install script warns that the bin dir isn't on your PATH, add it (e.g. to `~/.zshrc`):
 

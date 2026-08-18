@@ -1,11 +1,13 @@
 #!/usr/bin/env sh
-# Install branch-graph: build the release binary and put it on your PATH.
+# Install branch-graph: build the release binary and symlink it onto your PATH.
+#
+# The install is a symlink into target/release, so a later `cargo build --release`
+# updates the installed command in place. (`cargo clean` removes what the link points
+# at, so rebuild or re-run this script after one.)
 #
 # Usage:
 #   ./install.sh                 # build, then install to ~/.local/bin (default)
 #   BINDIR=/usr/local/bin ./install.sh
-#   LINK=1 ./install.sh          # symlink target/release instead of copying, so a
-#                                # later `cargo build --release` updates it in place
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -35,14 +37,8 @@ for name in branch-graph cbg; do
   if [ -e "$target" ] || [ -L "$target" ]; then
     rm -f "$target"
   fi
-  if [ "${LINK:-}" = "1" ]; then
-    ln -s "$BUILT" "$target"
-    echo "Installed: $target -> $BUILT"
-  else
-    cp "$BUILT" "$target"
-    chmod +x "$target"
-    echo "Installed: $target"
-  fi
+  ln -s "$BUILT" "$target"
+  echo "Installed: $target -> $BUILT"
 done
 
 # Warn if BINDIR is not on PATH.
