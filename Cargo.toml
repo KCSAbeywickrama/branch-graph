@@ -1,0 +1,27 @@
+[package]
+name = "branch-graph"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT"
+description = "Visualize the Claude Code session fork tree and resume any branch in-session (zero LLM tokens)."
+
+[[bin]]
+name = "branch-graph"
+path = "src/main.rs"
+
+[dependencies]
+# Transcript lines are parsed into a narrow struct, so serde skips the large
+# message/tool-result payloads without allocating them. That skip is where the
+# speed comes from; a Value-per-line parse would allocate the whole DOM.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# termios / ioctl(TIOCGWINSZ) / poll / localtime_r for the picker. The TUI writes
+# its own escape sequences, exactly like the Node original, so no curses stack.
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
