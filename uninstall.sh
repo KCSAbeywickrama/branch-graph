@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Remove the branch-graph binaries installed by install.sh.
+# Remove the branch-graph binaries installed by install.sh or install-dev.sh.
 #
 # Usage:
 #   ./uninstall.sh

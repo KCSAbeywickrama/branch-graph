@@ -1,0 +1,158 @@
+name: release
+
+# Builds the four supported host targets and publishes them to a GitHub Release.
+# Triggered by pushing a version tag; workflow_dispatch re-runs against an
+# existing tag if a release needs rebuilding.
+#
+# Only first-party actions are used (checkout, upload/download-artifact) and the
+# release itself is cut with the preinstalled `gh` CLI, so no third-party action
+# gets a token with contents:write.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v1.0.0)'
+        required: true
+
+# Read-only by default; only the release job is granted write.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One target failing should not hide whether the others are healthy.
+      fail-fast: false
+      matrix:
+        include:
+          # Both macOS targets cross-build natively on an arm64 runner: the
+          # macOS SDK carries both architectures.
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          # musl rather than gnu so the binaries are static and do not inherit
+          # the runner's glibc version as a floor on what distros can run them.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # Rust ships a self-contained musl, but musl-tools removes any dependency
+      # on that staying true.
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # --locked builds exactly the committed Cargo.lock, so a release is
+      # reproducible from the tag rather than from whatever resolved that day.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -eu
+          stage="branch-graph-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/branch-graph" "$stage/"
+          cp LICENSE README.md "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: branch-graph-${{ matrix.target }}
+          path: branch-graph-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Checksums are what install.sh verifies before it executes anything it
+      # downloaded, so they are generated once here over the final assets.
+      - name: Generate checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Write release notes
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          cat > notes.md <<NOTES
+          ## Install
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/install.sh | sh
+          \`\`\`
+
+          Installs \`branch-graph\` and the short alias \`cbg\` into \`~/.local/bin\`.
+          Set \`BINDIR\` to install elsewhere, or \`VERSION=${TAG}\` to pin this release.
+
+          ## Verify
+
+          \`\`\`sh
+          sha256sum -c SHA256SUMS --ignore-missing
+          \`\`\`
+
+          ## Downloading with a browser instead?
+
+          These binaries are ad-hoc signed, not notarized by Apple. Files fetched
+          with \`curl\`, \`wget\` or \`git\` are never quarantined, but a browser
+          download on macOS is, and Gatekeeper will refuse to run it until the
+          attribute is cleared:
+
+          \`\`\`sh
+          xattr -d com.apple.quarantine ./branch-graph
+          \`\`\`
+
+          ## Assets
+
+          | Platform | Asset |
+          | --- | --- |
+          | macOS (Apple Silicon) | \`branch-graph-aarch64-apple-darwin.tar.gz\` |
+          | macOS (Intel) | \`branch-graph-x86_64-apple-darwin.tar.gz\` |
+          | Linux (x86_64, static) | \`branch-graph-x86_64-unknown-linux-musl.tar.gz\` |
+          | Linux (arm64, static) | \`branch-graph-aarch64-unknown-linux-musl.tar.gz\` |
+          NOTES
+          cat notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          gh release create "$TAG" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --verify-tag

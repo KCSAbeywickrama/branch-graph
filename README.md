@@ -25,26 +25,25 @@ Branches in my-project
 
 ## Install
 
-Requires a Rust toolchain (1.70 or newer — [rustup.rs](https://rustup.rs)). Nothing is
-needed at runtime: the build produces a single binary and Node is not involved.
-
 ```sh
-./install.sh                       # builds, then symlinks `branch-graph` into ~/.local/bin
-BINDIR=/usr/local/bin ./install.sh # or choose another bin dir
+curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/branch-graph/rust/install.sh | sh
 ```
 
-Or build it yourself and put `target/release/branch-graph` wherever you like:
+Downloads a prebuilt binary for your platform, verifies its SHA-256 against the release
+checksums, then installs `branch-graph` into `~/.local/bin`. No Rust toolchain needed.
+
+Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux (x86_64 and arm64,
+statically linked). Any other platform builds from source automatically, which does need
+a Rust toolchain (1.70 or newer — [rustup.rs](https://rustup.rs)).
 
 ```sh
-cargo build --release
+BINDIR=/usr/local/bin ./install.sh   # choose another bin dir
+VERSION=v1.0.0 ./install.sh          # pin a specific release
+FROM_SOURCE=1 ./install.sh           # skip the download, build locally
 ```
 
 This also installs `cbg`, a short alias for `branch-graph` — use whichever you prefer,
 they're interchangeable everywhere in this README.
-
-Both are symlinks into `target/release`, so `cargo build --release` updates the installed
-command in place, with no reinstall while you're working on it. (`cargo clean` removes
-what they point at, so rebuild or re-run `./install.sh` after one.)
 
 If the install script warns that the bin dir isn't on your PATH, add it (e.g. to `~/.zshrc`):
 
@@ -56,6 +55,35 @@ Uninstall:
 
 ```sh
 ./uninstall.sh
+```
+
+### Working on the code
+
+`install-dev.sh` points `~/.local/bin/branch-graph` at `target/release/branch-graph` with a
+symlink instead of copying it, so `cargo build --release` updates the installed command in
+place with no reinstall while you work:
+
+```sh
+./install-dev.sh
+```
+
+(`cargo clean` removes what the symlink points at, so rebuild or re-run it after one.)
+
+### Verifying a download
+
+Every release ships a `SHA256SUMS` file, which `install.sh` checks before it installs
+anything. To check a manual download yourself:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+The binaries are ad-hoc signed, not notarized by Apple. `curl`, `wget` and `git` never set
+macOS's quarantine attribute, so an installed binary runs as-is — but a **browser**
+download is quarantined, and Gatekeeper blocks it until you clear that:
+
+```sh
+xattr -d com.apple.quarantine ./branch-graph
 ```
 
 ## Interactive picker (separate terminal)

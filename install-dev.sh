@@ -1,0 +1,60 @@
+#!/usr/bin/env sh
+# Install branch-graph for working on it: build the release binary and symlink it
+# onto your PATH.
+#
+# The install is a symlink into target/release, so a later `cargo build --release`
+# updates the installed command in place. (`cargo clean` removes what the link points
+# at, so rebuild or re-run this script after one.)
+#
+# For a normal install use ./install.sh instead: it downloads a checksum-verified
+# prebuilt binary and copies it, so it survives `cargo clean`.
+#
+# Usage:
+#   ./install-dev.sh                 # build, then install to ~/.local/bin (default)
+#   BINDIR=/usr/local/bin ./install-dev.sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+BINDIR="${BINDIR:-$HOME/.local/bin}"
+BUILT="$SCRIPT_DIR/target/release/branch-graph"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "install: cargo not found on PATH." >&2
+  echo "  Install a Rust toolchain (https://rustup.rs), or if you just installed one," >&2
+  echo "  start a new shell or run: . \"\$HOME/.cargo/env\"" >&2
+  exit 1
+fi
+
+echo "Building release binary..."
+( cd "$SCRIPT_DIR" && cargo build --release )
+
+if [ ! -x "$BUILT" ]; then
+  echo "install: build succeeded but $BUILT is missing" >&2
+  exit 1
+fi
+
+mkdir -p "$BINDIR"
+
+# Install under both names: `branch-graph` and the short alias `cbg`.
+for name in branch-graph cbg; do
+  target="$BINDIR/$name"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    rm -f "$target"
+  fi
+  ln -s "$BUILT" "$target"
+  echo "Installed: $target -> $BUILT"
+done
+
+# Warn if BINDIR is not on PATH.
+case ":$PATH:" in
+  *":$BINDIR:"*) ;;
+  *)
+    echo
+    echo "NOTE: $BINDIR is not on your PATH."
+    echo "Add this to your shell profile (e.g. ~/.zshrc):"
+    echo "  export PATH=\"$BINDIR:\$PATH\""
+    ;;
+esac
+
+echo
+echo "Try it: branch-graph  or  cbg    (or inside Claude Code: !branch-graph  or !cbg)"
