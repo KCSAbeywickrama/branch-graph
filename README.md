@@ -252,3 +252,7 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
   to navigate to abandoned rewind branches (no such feature exists yet; checked 2026-06-27).
 - In the in-session (`!` prefix) mode, the tool surfaces the `/resume <id>` line but cannot
   perform the switch itself; the separate-terminal picker can.
+
+## Disclaimer
+
+**branch-graph** is a third-party tool and is not affiliated with Anthropic.
