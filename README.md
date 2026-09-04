@@ -301,7 +301,13 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
 cargo test                   # scanning, tree building, search, and text layout
 cargo clippy --all-targets   # clean
 cargo fmt
+cargo build --release        # refresh the binary the dev symlink points at
 ```
+
+That last one is what makes a change show up in the installed `branch-graph` / `cbg`:
+[`install-dev.sh`](#working-on-the-code) symlinks them into `target/release`, so a release
+build is the whole install step. After a `cargo clean` the link's target is gone, so
+rebuild or re-run the script.
 
 The code is split so each piece reads on its own:
 
