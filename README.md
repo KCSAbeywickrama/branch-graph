@@ -14,14 +14,19 @@ session branched from which. `branch-graph` reconstructs and draws that tree.
 ```
 Branches in my-project
 
-1  ● a4f3d8c2  Draft initial README outline
-2  ● 9b6e1f47  Design payment retry logic
-3  ├─● c8a2b91d  stripe-webhooks
-4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhooks
-5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration (most recent)
-6  └─● 7f2e8c15  paypal-webhooks
-...
+6  ● a4f3d8c2  Draft initial README outline
+5  ● 9b6e1f47  Design payment retry logic
+4  ├─● c8a2b91d  stripe-webhooks
+3  │  ├─● 5e7f3a06  Add signature verification for Stripe webhooks
+1  │  └─● 1d4c9b82  Handle partial refunds and capture expiration (most recent)
+2  └─● 7f2e8c15  paypal-webhooks
 ```
+
+The number on each row is a **recency rank**, not a row position: `1` is the branch you
+were in most recently, `2` the one before it, and so on. So `branch-graph 1` always
+resumes the newest branch. The tree itself is drawn oldest-first, so a fork always sits
+under what it came from — which is why the number column doesn't run in order down the
+page.
 
 ## Install
 
@@ -103,14 +108,14 @@ selection:
 ```
 Branches in my-project
 
-1  ● a4f3d8c2  Draft initial README outline  10/07  9:14AM
-2  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM
-3  ├─● c8a2b91d  stripe-webhooks  13/07 10:22AM
-4  │  ├─● 5e7f3a06  Add signature verification for Stripe webhoo…  14/07  1:47PM
-5  │  └─● 1d4c9b82  Handle partial refunds and capture expiration  15/07  3:42PM
-6  ├─● 7f2e8c15  paypal-webhooks  15/07  5:08PM
-7  │  └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
-8  └─● e91f4a73  Add structured logging to webhook handlers  (most recent)
+8  ● a4f3d8c2  Draft initial README outline  10/07  9:14AM
+7  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM
+6  ├─● c8a2b91d  stripe-webhooks  13/07 10:22AM
+5  │  ├─● 5e7f3a06  Add signature verification for Stripe webhoo…  14/07  1:47PM
+4  │  └─● 1d4c9b82  Handle partial refunds and capture expiration  15/07  3:42PM
+3  ├─● 7f2e8c15  paypal-webhooks  15/07  5:08PM
+2  │  └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
+1  └─● e91f4a73  Add structured logging to webhook handlers  (most recent)
 
 ────────────────────────────────────────────────────────────────────────────────
 1d4c9b82-3f6e-4a71-9c58-7b2e8f4a6d91
@@ -127,26 +132,26 @@ handler idempotent so replayed webhook events don't trigger duplicate
 ↑/↓/hover: navigate   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit
 ```
 
-Row 5 is the current selection — shown in reverse video in a real terminal (a
+Row 4 is the current selection — shown in reverse video in a real terminal (a
 plain-text block can't reproduce that), with the detail panel below always describing
 whichever row is selected. The tree lines (`├─`/`└─`/`│`) mirror the fork structure
 exactly as `/branch` created it, and each label follows Claude Code's own precedence
 for naming a session:
 
-- **Explicit branch name** — set with `/branch <name>` or `/rename`, shown bold. Rows 3
-  (`stripe-webhooks`) and 6 (`paypal-webhooks`). A name you set always wins over
+- **Explicit branch name** — set with `/branch <name>` or `/rename`, shown bold. Rows 6
+  (`stripe-webhooks`) and 3 (`paypal-webhooks`). A name you set always wins over
   Claude's generated title, so a `/rename` shows up here immediately.
 - **AI-generated title** — Claude's own summary of the session (`aiTitle`), shown
-  bold. Rows 1, 2, and 8.
+  bold. Rows 8, 7, and 1.
 - **First prompt** — falls back to the branch's own first typed message when it has
-  no title or name, shown as plain text. Rows 4, 5, and 7.
+  no title or name, shown as plain text. Rows 5, 4, and 2.
 
 (If none of those exist, `branch-graph` falls back further to a stored slug, then the
-raw session id.) Labels are truncated to whatever room the row has left, as row 4 shows.
+raw session id.) Labels are truncated to whatever room the row has left, as row 5 shows.
 
 Trailing each label is when that branch was **last active**, in short `DD/MM h:mmAM` form,
 so you can see at a glance which branches are fresh and which are stale. On the one row
-that carries a marker, the marker takes that slot instead: row 8's `(most recent)` — the
+that carries a marker, the marker takes that slot instead: row 1's `(most recent)` — the
 newest session in the project — or `← current` when you launched `branch-graph` from
 inside a session of this project. The full timestamp for the selected row is in the detail
 panel below.
@@ -173,17 +178,17 @@ its parent branches — greyed out — so you can still see where it hangs off:
 Branches in my-project
 search: paypal   2 of 8
 
-2  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM      ← grey (context only)
-6  └─● 7f2e8c15  paypal-webhooks  15/07  5:08PM               ← selected
-7     └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
+7  ● 9b6e1f47  Design payment retry logic  12/07  4:03PM      ← grey (context only)
+3  └─● 7f2e8c15  paypal-webhooks  15/07  5:08PM               ← selected
+2     └─● b3a6d904  Wire up PayPal IPN handler  16/07 11:30AM
 ```
 
-Only rows 6 and 7 match — the count says **2 of 8**, not 3, because row 2 is kept
+Only rows 3 and 2 match — the count says **2 of 8**, not 3, because row 7 is kept
 purely as context: it's their parent, so the matches still have a place in the tree.
 Context rows are **greyed out** so the real hits stand out, and the connectors are
-redrawn for the smaller tree — row 6 becomes a `└─` once its siblings are gone.
+redrawn for the smaller tree — row 3 becomes a `└─` once its siblings are gone.
 
-The selection starts on the **first actual match** (row 6), never on a grey context
+The selection starts on the **first actual match** (row 3), never on a grey context
 row, and stays put as you keep typing for as long as that branch still matches.
 Context rows are still fully selectable and resumable if you want one.
 
@@ -285,6 +290,9 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
   recently written session as `(most recent)` so there's always a useful anchor.
 - Takes each branch's last-active time from its transcript file's modification time —
   shown short (`15/08  1:05PM`) after the label in the picker, in full in the detail panel.
+- Numbers the rows by that same last-active time, newest first, so `1` is always the most
+  recent branch. Ties fall back to the drawing order, so the numbering is stable across
+  runs for a project you haven't touched.
 - Surfaces a ready `/resume <id>` for each branch.
 
 ## Development

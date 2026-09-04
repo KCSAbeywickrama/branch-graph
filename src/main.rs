@@ -238,6 +238,7 @@ fn help() -> String {
         "Usage:",
         "  !branch-graph            list the fork tree with a /resume line per branch",
         "  !branch-graph <n>        print only the /resume line for branch number <n>",
+        "                           (1 is the most recent branch, 2 the one before it)",
         "  !branch-graph ..         go up one fork level from the most recent branch",
         "",
         "In a real terminal it opens an interactive picker (↑/↓ or mouse to navigate, p/← to",
@@ -427,7 +428,8 @@ fn main() {
     tree::compute_effective_parents(&mut nodes);
     search::build_haystacks(&mut nodes);
     let all: Vec<usize> = (0..nodes.len()).collect();
-    let rows = tree::flatten(&tree::build_forest(&nodes, &all));
+    let mut rows = tree::flatten(&tree::build_forest(&nodes, &all));
+    tree::number_by_recency(&nodes, &mut rows);
 
     let project_name = match opts.project.as_deref() {
         Some(p) => resolve_path(p)

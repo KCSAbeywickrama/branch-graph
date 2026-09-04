@@ -70,8 +70,10 @@ pub struct Row {
     pub node: usize,
     pub prefix: String,
     pub connector: &'static str,
-    /// Stable 1-based index over the FULL tree. Filtered views keep the original
-    /// number, because it is what `branch-graph <n>` takes.
+    /// 1-based recency rank over the FULL tree: 1 is the most recently active branch,
+    /// 2 the one before it. Not a row position, so the column does not ascend down the
+    /// tree. Filtered views keep the original number, because it is what
+    /// `branch-graph <n>` takes. Assigned only by `tree::number_by_recency`.
     pub index: usize,
     /// `None` in an unfiltered list; `Some(true)` for a search hit, `Some(false)`
     /// for a row kept only as context. So `!= Some(false)` reads as "not a context

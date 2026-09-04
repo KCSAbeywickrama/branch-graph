@@ -1,5 +1,6 @@
-//! Building the fork forest and flattening it into drawable rows.
+//! Building the fork forest, flattening it into drawable rows, and numbering them.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{Node, Row};
@@ -88,17 +89,32 @@ fn visit(
     }
 }
 
-/// DFS over the forest, assigning stable 1-based indices and the tree art per row.
+/// DFS over the forest, giving each row its tree art. Rows come back in draw order with
+/// `index` still 0: numbering needs the nodes, not just the shape, so `number_by_recency`
+/// owns it and is the only thing that ever sets `Row::index`.
 pub fn flatten(forest: &Forest) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
     let last = forest.roots.len().saturating_sub(1);
     for (i, &r) in forest.roots.iter().enumerate() {
         visit(forest, r, "", i == last, true, &mut out);
     }
-    for (i, row) in out.iter_mut().enumerate() {
-        row.index = i + 1;
-    }
     out
+}
+
+/// Assign the 1-based number the UI shows and `branch-graph <n>` takes: 1 is the most
+/// recently active branch, 2 the one before it, and so on. Numbering by recency instead
+/// of by row position makes `1` always mean "the branch I was just in", at the cost of a
+/// column that no longer ascends down the tree.
+///
+/// `rows` arrives in draw order and `sort_by_key` is stable, so branches sharing an mtime
+/// are numbered top-to-bottom — the same tie-break `build_forest` uses, and what keeps the
+/// numbering deterministic across runs.
+pub fn number_by_recency(nodes: &[Node], rows: &mut [Row]) {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| Reverse(nodes[rows[i].node].mtime));
+    for (rank, &i) in order.iter().enumerate() {
+        rows[i].index = rank + 1;
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +131,8 @@ mod tests {
     fn build(mut nodes: Vec<Node>) -> (Vec<Node>, Vec<Row>) {
         compute_effective_parents(&mut nodes);
         let all: Vec<usize> = (0..nodes.len()).collect();
-        let rows = flatten(&build_forest(&nodes, &all));
+        let mut rows = flatten(&build_forest(&nodes, &all));
+        number_by_recency(&nodes, &mut rows);
         (nodes, rows)
     }
 
@@ -134,10 +151,26 @@ mod tests {
             .map(|r| nodes[r.node].session_id.as_str())
             .collect();
         assert_eq!(order, vec!["root-a", "kid-early", "kid-late", "root-b"]);
-        // Indices are assigned in draw order, 1-based.
+        // Numbers are recency ranks, not row positions: kid-late is the newest, so it is
+        // 1 even though it is drawn third, and the column reads 4, 2, 1, 3 down the tree.
         assert_eq!(
             rows.iter().map(|r| r.index).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4]
+            vec![4, 2, 1, 3]
+        );
+    }
+
+    /// Branches with identical mtimes must not swap numbers between runs, so ties fall
+    /// back to draw order.
+    #[test]
+    fn equal_mtimes_are_numbered_in_draw_order() {
+        let (_, rows) = build(vec![
+            node("r", None, 10),
+            node("a", Some("r"), 10),
+            node("b", Some("r"), 10),
+        ]);
+        assert_eq!(
+            rows.iter().map(|r| r.index).collect::<Vec<_>>(),
+            vec![1, 2, 3]
         );
     }
 

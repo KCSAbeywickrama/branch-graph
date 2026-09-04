@@ -91,8 +91,9 @@ fn match_node(n: &Node, tokens: &[(String, Vec<char>)]) -> bool {
 
 /// Rows matching `query`, plus each match's ancestors so the tree still reads as a
 /// tree. The pruned set is re-flattened for correct connectors/prefixes, then the
-/// original 1-based indices are restored — they line up with the `branch-graph <n>`
-/// CLI arg, so rows must keep their real numbers rather than being renumbered.
+/// indices are copied back off `all_rows` — they line up with the `branch-graph <n>`
+/// CLI arg, so rows must keep their real numbers rather than being renumbered. That
+/// copy is required, not cosmetic: `flatten` leaves `index` at 0.
 /// Each returned row carries `matched`: `Some(true)` for a real hit, `Some(false)` for
 /// a row kept only as context.
 pub fn filter_rows(nodes: &[Node], all_rows: &[Row], query: &str) -> Vec<Row> {
@@ -156,7 +157,7 @@ pub fn filter_rows(nodes: &[Node], all_rows: &[Row], query: &str) -> Vec<Row> {
 mod tests {
     use super::*;
     use crate::model::Row;
-    use crate::tree::{build_forest, compute_effective_parents, flatten};
+    use crate::tree::{build_forest, compute_effective_parents, flatten, number_by_recency};
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
@@ -260,16 +261,19 @@ mod tests {
         compute_effective_parents(&mut nodes);
         build_haystacks(&mut nodes);
         let all: Vec<usize> = (0..nodes.len()).collect();
-        let all_rows: Vec<Row> = flatten(&build_forest(&nodes, &all));
+        let mut all_rows: Vec<Row> = flatten(&build_forest(&nodes, &all));
+        number_by_recency(&nodes, &mut all_rows);
         let rows = filter_rows(&nodes, &all_rows, "paypal");
 
         // The parent is carried along, but only the two real hits count as matches.
         let hits = rows.iter().filter(|r| r.matched == Some(true)).count();
         assert_eq!(hits, 2);
         assert_eq!(rows.len(), 3);
-        // Original numbering survives filtering.
+        // Original numbering survives filtering: each branch keeps the recency rank it
+        // has in the full tree (here the newest, e0000000, is 1) rather than being
+        // renumbered 1-3 for the smaller view.
         let idx: Vec<usize> = rows.iter().map(|r| r.index).collect();
-        assert_eq!(idx, vec![2, 4, 5]);
+        assert_eq!(idx, vec![4, 2, 1]);
         // Row 2 is context only, and row 4 becomes a `└─` now that its sibling is gone.
         assert_eq!(rows[0].matched, Some(false));
         assert_eq!(rows[1].connector, "└─");
@@ -282,7 +286,8 @@ mod tests {
         compute_effective_parents(&mut nodes);
         build_haystacks(&mut nodes);
         let all: Vec<usize> = (0..nodes.len()).collect();
-        let all_rows = flatten(&build_forest(&nodes, &all));
+        let mut all_rows = flatten(&build_forest(&nodes, &all));
+        number_by_recency(&nodes, &mut all_rows);
         assert!(filter_rows(&nodes, &all_rows, "nothingmatchesthis").is_empty());
         // An all-whitespace query is not a filter at all.
         assert_eq!(filter_rows(&nodes, &all_rows, "   ").len(), 1);
