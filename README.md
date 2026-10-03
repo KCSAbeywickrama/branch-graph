@@ -159,9 +159,10 @@ inside a session of this project. The full timestamp for the selected row is in 
 panel below.
 
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
-- **Shift+↑/↓** or **K/J** — step by row number instead of tree position: to the next
-  newer (lower number) or older (higher number) branch, wherever it sits in the tree. In
-  a search they step through the matches only, skipping grey context rows.
+- **Shift+↑/↓** or **K/J** — step by row number instead of tree position: up to the next
+  older branch (higher number), down to the next newer one (lower number), wherever it
+  sits in the tree. In a search they step through the matches only, skipping grey
+  context rows.
 - **p** or **←** — jump the selection to the branch this one was forked from (its
   parent). On a root branch it does nothing.
 - **→** — descend to this branch's most recent child. On a branch with no forks off it,

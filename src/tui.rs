@@ -530,9 +530,12 @@ impl<'a> Picker<'a> {
     fn dispatch_csi_final(&mut self, f: u8, shift: bool) {
         match f {
             // Shift+↑/↓ walk the recency numbers; every other modifier combo acts as
-            // the bare key, as it did before modifiers were read at all.
-            b'A' if shift => self.move_by_index(-1),
-            b'B' if shift => self.move_by_index(1),
+            // the bare key, as it did before modifiers were read at all. ↑ goes back in
+            // time (a higher number), like shell history — and since the tree is drawn
+            // oldest first, older branches usually sit above, so it also tends to move
+            // the highlight the way the arrow points.
+            b'A' if shift => self.move_by_index(1),
+            b'B' if shift => self.move_by_index(-1),
             b'A' => self.move_sel(-1),
             b'B' => self.move_sel(1),
             b'H' => self.jump_to(0),
@@ -621,9 +624,9 @@ impl<'a> Picker<'a> {
                     self.move_sel(1);
                 } else if ch == b'K' {
                     // Shifted j/k mirror Shift+↑/↓, for terminals that don't send those.
-                    self.move_by_index(-1);
-                } else if ch == b'J' {
                     self.move_by_index(1);
+                } else if ch == b'J' {
+                    self.move_by_index(-1);
                 } else if ch == b'p' {
                     self.select_parent();
                 } else if ch == b'g' {
