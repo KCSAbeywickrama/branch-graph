@@ -1,10 +1,11 @@
 //! branch-graph — visualize the Claude Code session fork tree (zero LLM tokens).
 //!
-//! Claude Code's `/branch` (and `--fork-session`) creates a NEW session whose JSONL
-//! lines carry `forkedFrom: { sessionId, messageUuid }`. This tool reads every session
-//! transcript for the current project, reconstructs the fork tree, highlights the
-//! current session, and surfaces a ready `/resume <id>` for each branch so you can
-//! switch in place inside the running Claude Code instance.
+//! Claude Code's `/branch` creates a NEW session whose JSONL lines carry
+//! `forkedFrom: { sessionId, messageUuid }`; `--fork-session` creates one too, but
+//! records no `forkedFrom`, so its parent is traced from the message uuids it copied.
+//! This tool reads every session transcript for the current project, reconstructs the
+//! fork tree, highlights the current session, and surfaces a ready `/resume <id>` for
+//! each branch so you can switch in place inside the running Claude Code instance.
 //!
 //! Usage (inside Claude Code, zero tokens):
 //!   !branch-graph            list the fork tree with a /resume line per branch
@@ -24,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use model::{short_id, Node};
+use model::{short_id, Lineage, Node};
 use render::{dim, resume_line, truncate};
 
 // ---------- args ----------
@@ -314,7 +315,7 @@ fn main() {
     // transcript is parsed: which sessions live here, and which was written last. The
     // `..` fast path below runs on these; the scan loop reuses the same mtimes so both
     // paths agree on which session is newest.
-    let mut entries: Vec<(PathBuf, String, i64)> = Vec::new();
+    let mut entries: Vec<(PathBuf, String, i64, Option<i64>)> = Vec::new();
     let mut newest_file: Option<String> = None;
     let mut newest_mtime: i64 = -1;
     for entry in read.flatten() {
@@ -331,17 +332,20 @@ fn main() {
             continue;
         }
         let session_id = name[..name.len() - ".jsonl".len()].to_string();
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let epoch_ms = |t: std::io::Result<std::time::SystemTime>| {
+            t.ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+        };
+        let mtime = epoch_ms(meta.modified()).unwrap_or(0);
+        // Not every filesystem keeps a birth time; without one, a `--fork-session` copy
+        // just isn't placed under its parent.
+        let born = epoch_ms(meta.created());
         if mtime > newest_mtime {
             newest_mtime = mtime;
             newest_file = Some(session_id.clone());
         }
-        entries.push((path, session_id, mtime));
+        entries.push((path, session_id, mtime, born));
     }
     if entries.is_empty() {
         eprintln!("branch-graph: no session transcripts in {}", dir.display());
@@ -377,8 +381,9 @@ fn main() {
     // `..` fast path. Going up needs exactly two facts — the anchor and what it forked
     // from — and both are cheap, so answer without parsing the project. --json and a
     // branch number describe the whole tree, so those keep the full scan. Anything
-    // `first_fork_parent` can't settle (root, or a parent whose transcript lives in
-    // another project) falls through to the scan below, which owns the diagnostics.
+    // `first_fork_parent` can't settle (root, a `--fork-session` copy whose parent only
+    // the full scan can trace, or a parent whose transcript lives in another project)
+    // falls through to the scan below, which owns the diagnostics.
     if opts.parent && !opts.json && opts.index.is_none() {
         if let Some(anchor) = anchor_id.as_deref() {
             let file = dir.join(format!("{}.jsonl", anchor));
@@ -400,26 +405,37 @@ fn main() {
         .max(1);
     let chunk_size = (entries.len() + n_threads - 1) / n_threads;
     let mut nodes: Vec<Node> = Vec::with_capacity(entries.len());
+    let mut lineage: Vec<Lineage> = Vec::with_capacity(entries.len());
     std::thread::scope(|s| {
         let mut handles = Vec::new();
         for chunk in entries.chunks(chunk_size) {
             handles.push(s.spawn(move || {
                 chunk
                     .iter()
-                    .map(|(path, sid, mtime)| {
-                        let mut n = scan::scan_session(path, sid);
+                    .map(|(path, sid, mtime, born)| {
+                        let (mut n, l) = scan::scan_session(path, sid);
                         n.mtime = *mtime;
-                        n
+                        n.born = *born;
+                        (n, l)
                     })
-                    .collect::<Vec<Node>>()
+                    .collect::<Vec<(Node, Lineage)>>()
             }));
         }
         for h in handles {
             if let Ok(part) = h.join() {
-                nodes.extend(part);
+                for (n, l) in part {
+                    nodes.push(n);
+                    lineage.push(l);
+                }
             }
         }
     });
+    // Needs every transcript at once: a copy's parent is whichever other one holds its
+    // history, and whether its name is its own depends on the parent's. The uuid sets
+    // are dropped as soon as both are settled.
+    tree::infer_copied_parents(&mut nodes, &lineage);
+    tree::prefer_own_titles(&mut nodes, &lineage);
+    drop(lineage);
 
     for n in nodes.iter_mut() {
         n.current = exact_match && current_id.as_deref() == Some(n.session_id.as_str());

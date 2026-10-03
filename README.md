@@ -140,7 +140,9 @@ for naming a session:
 
 - **Explicit branch name** — set with `/branch <name>` or `/rename`, shown bold. Rows 6
   (`stripe-webhooks`) and 3 (`paypal-webhooks`). A name you set always wins over
-  Claude's generated title, so a `/rename` shows up here immediately.
+  Claude's generated title, so a `/rename` shows up here immediately. The exception is a
+  name a fork merely inherited: a `--fork-session` copy can start out with its parent's
+  name, and until you rename it, it shows its own title (`<name> ⑂`) instead.
 - **AI-generated title** — Claude's own summary of the session (`aiTitle`), shown
   bold. Rows 8, 7, and 1.
 - **First prompt** — falls back to the branch's own first typed message when it has
@@ -284,6 +286,11 @@ redirects stay color-free. Override with `--color` / `--no-color` or the `FORCE_
 - Reads the session transcripts for the current project under
   `~/.claude/projects/<dir>/<sessionId>.jsonl`.
 - Builds the tree from each forked session's `forkedFrom: { sessionId, messageUuid }`.
+  `/branch` writes that; `claude --resume <id> --fork-session` doesn't, so for a session
+  without it the parent is traced from content instead: a copy keeps its parent's message
+  ids, and its parent is the oldest session that also holds the message where the copy
+  diverged. "Oldest" is by transcript file creation time, so on a filesystem that keeps
+  none, such copies are drawn as roots.
 - Marks the current session via the `CLAUDE_CODE_SESSION_ID` environment variable
   (`← current (this session)`). If that session isn't part of the project being shown
   (e.g. you used `--project`, or ran it from a plain terminal), it instead flags the most

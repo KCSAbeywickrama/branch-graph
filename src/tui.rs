@@ -308,9 +308,10 @@ impl<'a> Picker<'a> {
             format_time(n.mtime)
         )));
         lines.push(String::new());
-        // Heading: the winning name/title computed in scan_session (a rename supersedes
-        // the generated title rather than sitting alongside it). Body is always the
-        // first prompt, so a titled/named branch shows both.
+        // Heading: the winning name/title from scan_session (a typed name outranks the
+        // generated title rather than sitting alongside it), unless
+        // `tree::prefer_own_titles` found the name inherited. Body is always the first
+        // prompt, so a titled/named branch shows both.
         if let Some(h) = n.heading.as_deref() {
             lines.push(bold(&truncate(h, width)));
         }

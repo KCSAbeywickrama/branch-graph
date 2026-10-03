@@ -2,7 +2,9 @@
 //!
 //! A `/branch` fork replays the parent's history into the new file, tagging every
 //! copied line with `forkedFrom` (whose `messageUuid` equals that line's own uuid).
-//! The branch's OWN messages have no `forkedFrom`.
+//! The branch's OWN messages have no `forkedFrom`. A `--fork-session` copy keeps the
+//! message uuids but tags nothing, so its parent is traced later, across transcripts,
+//! from the `Lineage` this scan returns (see `tree::infer_copied_parents`).
 //!
 //! Within a single session, rewinding to an earlier prompt and retyping appends a
 //! NEW sibling: the old turns stay earlier in the file but become orphaned, and the
@@ -19,7 +21,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::model::{short_id, Node};
+use crate::model::{short_id, Lineage, Node};
 
 /// How many non-empty lines `first_fork_parent` reads before giving up. A fork's
 /// replayed history starts at line 1, so 1 would do; the slack costs nothing and
@@ -46,6 +48,7 @@ struct Record {
     kind: Option<String>,
     uuid: Option<String>,
     parent_uuid: Option<String>,
+    logical_parent_uuid: Option<String>,
     is_meta: Option<bool>,
     leaf_uuid: Option<String>,
     forked_from: Option<ForkedFrom>,
@@ -80,6 +83,7 @@ fn record_from_value(v: &Value) -> Record {
         kind: s("type"),
         uuid: s("uuid"),
         parent_uuid: s("parentUuid"),
+        logical_parent_uuid: s("logicalParentUuid"),
         is_meta: v.get("isMeta").and_then(|x| x.as_bool()),
         leaf_uuid: s("leafUuid"),
         forked_from: v
@@ -259,6 +263,9 @@ fn take_chars(s: &str, n: usize) -> String {
 /// One line of the message graph, as far as this tool cares.
 struct LineNode {
     parent: Option<String>,
+    /// A compaction boundary's link to the turn it summarised. Its `parentUuid` is null,
+    /// so the active path stops there; only the lineage walk crosses it.
+    logical_parent: Option<String>,
     is_user: bool,
     is_meta: bool,
     fork: bool,
@@ -266,22 +273,47 @@ struct LineNode {
     content: Option<String>,
 }
 
-/// Scan one transcript into a `Node`.
+/// Leaf-to-root walk from `head`, returned root first. With `across_compaction` it also
+/// steps over compaction boundaries via `logicalParentUuid`.
+fn walk_to_root(
+    nodes: &HashMap<String, LineNode>,
+    head: Option<String>,
+    across_compaction: bool,
+) -> Vec<String> {
+    let mut path: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cur = head;
+    while let Some(id) = cur {
+        let n = match nodes.get(&id) {
+            Some(n) if !seen.contains(&id) => n,
+            _ => break,
+        };
+        let next = match (&n.parent, across_compaction) {
+            (None, true) => n.logical_parent.clone(),
+            (p, _) => p.clone(),
+        };
+        seen.insert(id.clone());
+        path.push(id);
+        cur = next;
+    }
+    path.reverse();
+    path
+}
+
+/// Scan one transcript into a `Node`, plus the `Lineage` used to place it when it
+/// records no `forkedFrom`.
 ///
 /// An unreadable or truncated transcript yields a node labelled with its short id
 /// rather than failing the whole run: a session being written to right now is a
 /// normal thing to encounter, and dropping the file would also drop every branch
 /// forked from it.
-pub fn scan_session(file: &Path, session_id: &str) -> Node {
+pub fn scan_session(file: &Path, session_id: &str) -> (Node, Lineage) {
     let mut info = Node::new(session_id.to_string());
 
     let mut title: Option<String> = None;
     let mut slug: Option<String> = None;
     let mut name: Option<String> = None;
-    // Line numbers of the last title/name write, so we can tell which one is newer.
-    let mut title_at: i64 = -1;
-    let mut name_at: i64 = -1;
-    let mut line_no: i64 = 0;
+    let mut names: HashSet<String> = HashSet::new();
     // messageUuid of the last replayed line = divergence leaf.
     let mut last_fork_msg: Option<String> = None;
     let mut leaf_uuid: Option<String> = None;
@@ -292,7 +324,7 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
         Ok(f) => f,
         Err(_) => {
             info.label = short_id(session_id).to_string();
-            return info;
+            return (info, Lineage::default());
         }
     };
     let mut reader = BufReader::with_capacity(1 << 16, handle);
@@ -307,7 +339,6 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
         while raw.last() == Some(&b'\n') || raw.last() == Some(&b'\r') {
             raw.pop();
         }
-        line_no += 1;
         if raw.is_empty() {
             continue;
         }
@@ -339,18 +370,16 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
                 }
             }
         }
-        // Claude's own summary. NOTE: `/rename` on the LIVE session is also recorded
-        // here (it overwrites aiTitle), so this field is not purely machine-generated.
+        // Claude's own summary. A fork inherits its parent's, and Claude Code re-appends
+        // it after `custom-title` every time the session is resumed, so where it sits in
+        // the file says nothing about whether it is newer than a name.
         match rec
             .ai_title
             .as_ref()
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
         {
-            Some(t) => {
-                title = Some(t.to_string());
-                title_at = line_no;
-            }
+            Some(t) => title = Some(t.to_string()),
             None => {
                 if kind == "ai-title" {
                     let t = rec
@@ -362,7 +391,6 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
                         .filter(|t| !t.is_empty());
                     if let Some(t) = t {
                         title = Some(t.to_string());
-                        title_at = line_no;
                     }
                 }
             }
@@ -377,8 +405,10 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
             .filter(|t| !t.is_empty())
         {
             if !is_auto_branch_name(t) {
+                if name.as_deref() != Some(t) {
+                    names.insert(clean_prompt(t));
+                }
                 name = Some(t.to_string());
-                name_at = line_no;
             }
         }
         if slug.is_none() {
@@ -405,6 +435,7 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
                 uuid.clone(),
                 LineNode {
                     parent: rec.parent_uuid.filter(|s| !s.is_empty()),
+                    logical_parent: rec.logical_parent_uuid.filter(|s| !s.is_empty()),
                     is_user,
                     is_meta,
                     fork: is_fork_line,
@@ -419,19 +450,7 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
         Some(ref l) if nodes.contains_key(l) => Some(l.clone()),
         _ => last_uuid,
     };
-    let mut path: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut cur = head;
-    while let Some(id) = cur {
-        if !nodes.contains_key(&id) || seen.contains(&id) {
-            break;
-        }
-        let next = nodes.get(&id).and_then(|n| n.parent.clone());
-        seen.insert(id.clone());
-        path.push(id);
-        cur = next;
-    }
-    path.reverse();
+    let path = walk_to_root(&nodes, head.clone(), false);
 
     // First own (non-replayed) node on the active path marks the divergence; the first
     // own user message with text is this branch's first typed prompt.
@@ -474,15 +493,11 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
     } else {
         None
     };
-    // A session can be named from two places: a `custom-title` record (`/rename` on a
-    // non-live session, `/branch <name>`) or an `aiTitle` write (Claude's summary, and
-    // `/rename` on the live session). Neither kind outranks the other — whichever landed
-    // LAST in the transcript is what Claude Code itself displays, so a rename always
-    // supersedes an older title and vice versa. Falls back to the first typed prompt.
-    info.heading = match info.name.clone() {
-        Some(n) if name_at >= title_at => Some(n),
-        other => title.clone().or(other),
-    };
+    // A name the user typed (`/rename`, `/branch <name>`, both recorded as `custom-title`)
+    // outranks Claude's summary. Recency can't decide between them: Claude Code rewrites
+    // both on every resume, title second, and a fork's title is a stale copy of its
+    // parent's. Falls back to the first typed prompt.
+    info.heading = info.name.clone().or_else(|| title.clone());
     info.label = info
         .heading
         .clone()
@@ -492,7 +507,20 @@ pub fn scan_session(file: &Path, session_id: &str) -> Node {
     // Bold for a name/title, plain for a first prompt.
     info.strong = info.heading.is_some();
     info.prompt_full = take_chars(&first_prompt.or(slug).unwrap_or_default(), 4000);
-    info
+    // Only a fork without `forkedFrom` needs a path to trace; every transcript needs its
+    // uuids, since any of them may hold another's copied history.
+    let lineage_path = if info.parent.is_none() {
+        walk_to_root(&nodes, head, true)
+    } else {
+        Vec::new()
+    };
+    names.retain(|n| !n.is_empty());
+    let lineage = Lineage {
+        uuids: nodes.into_keys().collect(),
+        path: lineage_path,
+        names,
+    };
+    (info, lineage)
 }
 
 /// The sessionId `file` forked from, read from the head of the transcript, or None if
@@ -550,14 +578,14 @@ mod tests {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     const SID: &str = "cccccccc-0000-0000-0000-000000000000";
 
-    fn scan_lines(lines: &[&str]) -> Node {
+    fn scan_lines(lines: &[&str]) -> (Node, Lineage) {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let path =
             std::env::temp_dir().join(format!("bg-scan-test-{}-{}.jsonl", std::process::id(), n));
         std::fs::write(&path, lines.join("\n")).unwrap();
-        let node = scan_session(&path, SID);
+        let (node, lineage) = scan_session(&path, SID);
         let _ = std::fs::remove_file(&path);
-        node
+        (node, lineage)
     }
 
     #[test]
@@ -592,7 +620,7 @@ mod tests {
     /// the live head.
     #[test]
     fn first_prompt_follows_the_active_path_not_file_order() {
-        let node = scan_lines(&[
+        let (node, _) = scan_lines(&[
             r#"{"type":"user","uuid":"u1","parentUuid":null,"forkedFrom":{"sessionId":"parent-1","messageUuid":"u1"},"message":{"content":"replayed parent prompt"}}"#,
             r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","forkedFrom":{"sessionId":"parent-1","messageUuid":"a1"}}"#,
             r#"{"type":"user","uuid":"u2","parentUuid":"a1","message":{"content":"abandoned rewind prompt"}}"#,
@@ -611,29 +639,72 @@ mod tests {
         assert!(node.heading.is_none());
     }
 
+    /// Claude Code re-appends `custom-title` then `ai-title` on every resume, and a fork's
+    /// `aiTitle` is a stale copy of its parent's — so the title always lands last, and
+    /// position in the file can't be what decides.
     #[test]
-    fn last_write_wins_between_a_rename_and_a_generated_title() {
-        let name_last = scan_lines(&[
-            r#"{"type":"ai-title","uuid":"x1","aiTitle":"Generated title"}"#,
-            r#"{"type":"user","uuid":"u1","parentUuid":null,"customTitle":"stripe-webhooks","message":{"content":"a prompt"}}"#,
-        ]);
-        assert_eq!(name_last.heading.as_deref(), Some("stripe-webhooks"));
-        assert_eq!(name_last.label, "stripe-webhooks");
-        assert!(name_last.named);
-        assert!(name_last.strong);
+    fn a_typed_name_outranks_the_generated_title_wherever_it_sits() {
+        let renamed_fork = scan_lines(&[
+            r#"{"type":"custom-title","customTitle":"ai - remote app side new"}"#,
+            r#"{"type":"ai-title","aiTitle":"Parent's title (copied)"}"#,
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"a prompt"}}"#,
+            r#"{"type":"custom-title","customTitle":"ai - remote app side new"}"#,
+            r#"{"type":"ai-title","aiTitle":"Parent's title (copied)"}"#,
+        ])
+        .0;
+        assert_eq!(
+            renamed_fork.heading.as_deref(),
+            Some("ai - remote app side new")
+        );
+        assert_eq!(renamed_fork.label, "ai - remote app side new");
+        assert!(renamed_fork.named);
+        assert!(renamed_fork.strong);
+        // The title is still recorded, for the detail panel and search.
+        assert_eq!(
+            renamed_fork.title.as_deref(),
+            Some("Parent's title (copied)")
+        );
 
-        let title_last = scan_lines(&[
-            r#"{"type":"user","uuid":"u1","parentUuid":null,"customTitle":"old-name","message":{"content":"a prompt"}}"#,
-            r#"{"type":"ai-title","uuid":"x1","aiTitle":"Generated title"}"#,
+        let untitled = scan_lines(&[
+            r#"{"type":"ai-title","aiTitle":"Generated title"}"#,
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"a prompt"}}"#,
+        ])
+        .0;
+        assert_eq!(untitled.heading.as_deref(), Some("Generated title"));
+    }
+
+    /// A `--fork-session` copy has no `forkedFrom`, so its parent is traced from the
+    /// lineage — which must reach the copied history even after the fork compacts.
+    #[test]
+    fn lineage_path_crosses_compaction_but_the_active_path_does_not() {
+        let (node, lineage) = scan_lines(&[
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"copied prompt"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1"}"#,
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"cb","parentUuid":null,"logicalParentUuid":"a1"}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"cb","message":{"content":"after compaction"}}"#,
         ]);
-        assert_eq!(title_last.heading.as_deref(), Some("Generated title"));
-        // The name is still recorded, it just lost the recency contest.
-        assert_eq!(title_last.name.as_deref(), Some("old-name"));
+        assert!(node.parent.is_none());
+        assert_eq!(lineage.path, vec!["u1", "a1", "cb", "u2"]);
+        assert_eq!(lineage.uuids.len(), 4);
+        // The label still reads from the active path, which starts at the boundary.
+        assert_eq!(node.label, "after compaction");
+    }
+
+    #[test]
+    fn a_forked_from_transcript_keeps_no_lineage_path() {
+        let (node, lineage) = scan_lines(&[
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"forkedFrom":{"sessionId":"parent-1","messageUuid":"u1"},"message":{"content":"replayed"}}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"u1","message":{"content":"own"}}"#,
+        ]);
+        assert_eq!(node.parent.as_deref(), Some("parent-1"));
+        assert!(lineage.path.is_empty());
+        // Its uuids are still kept: a `--fork-session` copy of it would share them.
+        assert_eq!(lineage.uuids.len(), 2);
     }
 
     #[test]
     fn auto_branch_name_falls_back_to_the_first_prompt() {
-        let node = scan_lines(&[
+        let (node, _) = scan_lines(&[
             r#"{"type":"user","uuid":"u1","parentUuid":null,"customTitle":"Design payment retry logic (Branch 2)","message":{"content":"handle partial refunds"}}"#,
         ]);
         assert!(node.name.is_none());
@@ -645,7 +716,7 @@ mod tests {
     /// or every turn hanging off it would be orphaned too.
     #[test]
     fn a_line_with_an_odd_field_type_still_keeps_its_place() {
-        let node = scan_lines(&[
+        let (node, _) = scan_lines(&[
             r#"{"type":"user","uuid":"u1","parentUuid":null,"title":123,"message":{"content":"tolerant parse"}}"#,
         ]);
         assert_eq!(node.prompt_full, "tolerant parse");
@@ -653,7 +724,7 @@ mod tests {
 
     #[test]
     fn tool_result_arrays_are_not_prompts() {
-        let node = scan_lines(&[
+        let (node, _) = scan_lines(&[
             r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":[{"type":"tool_result","content":"output"}]}}"#,
             r#"{"type":"user","uuid":"u2","parentUuid":"u1","message":{"content":"the real prompt"}}"#,
         ]);
@@ -662,7 +733,7 @@ mod tests {
 
     #[test]
     fn meta_lines_are_not_prompts() {
-        let node = scan_lines(&[
+        let (node, _) = scan_lines(&[
             r#"{"type":"user","uuid":"u1","parentUuid":null,"isMeta":true,"message":{"content":"caveat: the messages below were generated"}}"#,
             r#"{"type":"user","uuid":"u2","parentUuid":"u1","message":{"content":"typed by a human"}}"#,
         ]);
@@ -671,7 +742,7 @@ mod tests {
 
     #[test]
     fn a_root_session_has_no_parent_and_falls_back_to_its_slug() {
-        let node = scan_lines(&[r#"{"type":"summary","slug":"payment-retry"}"#]);
+        let (node, _) = scan_lines(&[r#"{"type":"summary","slug":"payment-retry"}"#]);
         assert!(node.parent.is_none());
         assert!(node.fork_msg.is_none());
         assert_eq!(node.label, "payment-retry");
@@ -679,9 +750,9 @@ mod tests {
 
     #[test]
     fn an_empty_or_unreadable_transcript_degrades_to_its_short_id() {
-        let node = scan_lines(&[]);
+        let (node, _) = scan_lines(&[]);
         assert_eq!(node.label, "cccccccc");
-        let missing = scan_session(
+        let (missing, _) = scan_session(
             &std::env::temp_dir().join("bg-scan-test-does-not-exist.jsonl"),
             SID,
         );

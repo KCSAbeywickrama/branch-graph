@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{Node, Row};
+use crate::model::{Lineage, Node, Row};
 
 pub struct Forest {
     /// Node indices with no parent in the set being drawn, oldest first.
@@ -12,7 +12,113 @@ pub struct Forest {
     pub children: HashMap<usize, Vec<usize>>,
 }
 
-/// Resolve each node's `forkedFrom` against the sessions actually present here.
+/// Place each fork that records no `forkedFrom` — what `claude --resume <id>
+/// --fork-session` writes — under the session its copied history came from. Sets
+/// `parent` and `fork_msg`; runs before `compute_effective_parents`.
+///
+/// Such a copy keeps its parent's message uuids, so the leading run of its active path
+/// that an OLDER transcript also holds is the copied history, and the run's last message
+/// is where it diverged. The parent is the oldest transcript holding that message:
+/// siblings forked from the same parent hold it too, but only as copies.
+///
+/// "Older" means file creation time. Copied lines keep their original timestamps, so
+/// nothing inside a transcript tells a copy from its source. Requiring a strictly older
+/// parent is also what stops a session's own later forks, which hold its messages too,
+/// from passing for its parent, and it rules out cycles. A transcript without a creation
+/// time is left as it is.
+pub fn infer_copied_parents(nodes: &mut [Node], lineage: &[Lineage]) {
+    let is_candidate = |n: &Node| n.parent.is_none() && n.born.is_some();
+    // Index only the uuids some candidate's path asks about, not every message in the
+    // project.
+    let wanted: HashSet<&str> = nodes
+        .iter()
+        .zip(lineage)
+        .filter(|(n, _)| is_candidate(n))
+        .flat_map(|(_, l)| l.path.iter().map(String::as_str))
+        .collect();
+    if wanted.is_empty() {
+        return;
+    }
+    let mut holders: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, l) in lineage.iter().enumerate() {
+        if nodes[i].born.is_none() {
+            continue;
+        }
+        for u in &l.uuids {
+            if wanted.contains(u.as_str()) {
+                holders.entry(u.as_str()).or_default().push(i);
+            }
+        }
+    }
+
+    let mut found: Vec<(usize, String, String)> = Vec::new();
+    for (i, l) in lineage.iter().enumerate() {
+        let born = match nodes[i].born {
+            Some(b) if nodes[i].parent.is_none() => b,
+            _ => continue,
+        };
+        let older = |j: &usize| *j != i && nodes[*j].born.is_some_and(|b| b < born);
+        let mut diverged_at: Option<&str> = None;
+        for u in &l.path {
+            match holders.get(u.as_str()) {
+                Some(hs) if hs.iter().any(older) => diverged_at = Some(u),
+                _ => break,
+            }
+        }
+        let d = match diverged_at {
+            Some(d) => d,
+            None => continue,
+        };
+        let parent = holders[d]
+            .iter()
+            .filter(|j| older(j))
+            .min_by_key(|&&j| nodes[j].born);
+        if let Some(&p) = parent {
+            found.push((i, nodes[p].session_id.clone(), d.to_string()));
+        }
+    }
+    for (i, parent, d) in found {
+        nodes[i].parent = Some(parent);
+        nodes[i].fork_msg = Some(d);
+    }
+}
+
+/// Prefer a fork's own title over a name it merely inherited. A copy can start out with
+/// its parent's `custom-title` (`--fork-session` carries it across), and until it is
+/// renamed that name only repeats its parent's, while the title Claude Code gives the
+/// copy ("<name> ⑂") tells the two apart. The parent may have been renamed since, so any
+/// name it ever carried counts. Only the display changes: `name` keeps what the
+/// transcript recorded. Runs once parents are settled, recorded or inferred.
+pub fn prefer_own_titles(nodes: &mut [Node], lineage: &[Lineage]) {
+    let idx_by_id: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.session_id.as_str(), i))
+        .collect();
+    let inherited: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            let parent_names = n
+                .parent
+                .as_deref()
+                .and_then(|p| idx_by_id.get(p))
+                .map(|&p| &lineage[p].names);
+            match (n.name.as_ref(), parent_names) {
+                (Some(name), Some(names)) => n.title.is_some() && names.contains(name),
+                _ => false,
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for i in inherited {
+        let n = &mut nodes[i];
+        n.heading = n.title.clone();
+        n.label = n.title.clone().unwrap_or_default();
+    }
+}
+
+/// Resolve each node's `parent` against the sessions actually present here.
 /// A fork whose parent transcript lives in another project becomes a root, which is
 /// also what makes `..` able to say so rather than guessing.
 pub fn compute_effective_parents(nodes: &mut [Node]) {
@@ -172,6 +278,115 @@ mod tests {
             rows.iter().map(|r| r.index).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    fn copy(id: &str, born: Option<i64>, path: &[&str], extra: &[&str]) -> (Node, Lineage) {
+        let mut n = Node::new(id.to_string());
+        n.born = born;
+        let lineage = Lineage {
+            uuids: path.iter().chain(extra).map(|s| s.to_string()).collect(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            names: HashSet::new(),
+        };
+        (n, lineage)
+    }
+
+    /// `--fork-session` copies of P, recognisable only by the message uuids they share.
+    #[test]
+    fn copies_without_forked_from_are_placed_under_their_source() {
+        let (mut nodes, lineage): (Vec<Node>, Vec<Lineage>) = vec![
+            // Kept going after both copies were taken, and rewound once: p9 is off-path.
+            copy("P", Some(100), &["p1", "p2", "p3", "p4"], &["p9"]),
+            // Older sibling, copied at p3 — it holds p2 too, but only as a copy.
+            copy("A", Some(150), &["p1", "p2", "p3", "a1"], &[]),
+            copy("C", Some(200), &["p1", "p2", "c1"], &[]),
+            // A copy of C taken after C's own c1: its parent is C, not P.
+            copy("G", Some(300), &["p1", "p2", "c1", "g1"], &[]),
+            copy("R", Some(50), &["r1"], &[]),
+            // No creation time: nothing to order it by, so it is left alone.
+            copy("N", None, &["p1", "p2", "n1"], &[]),
+        ]
+        .into_iter()
+        .unzip();
+        infer_copied_parents(&mut nodes, &lineage);
+        let got: Vec<(&str, Option<&str>, Option<&str>)> = nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.session_id.as_str(),
+                    n.parent.as_deref(),
+                    n.fork_msg.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // P's history is held by A, C and G too, but none is older than P.
+                ("P", None, None),
+                ("A", Some("P"), Some("p3")),
+                ("C", Some("P"), Some("p2")),
+                ("G", Some("C"), Some("c1")),
+                ("R", None, None),
+                ("N", None, None),
+            ]
+        );
+    }
+
+    /// A `/branch` fork already names its parent; content overlap must not override it.
+    #[test]
+    fn a_recorded_forked_from_is_never_overridden() {
+        let (mut nodes, lineage): (Vec<Node>, Vec<Lineage>) = vec![
+            copy("P", Some(100), &["p1", "p2"], &[]),
+            copy("B", Some(200), &["p1", "p2", "b1"], &[]),
+        ]
+        .into_iter()
+        .unzip();
+        nodes[1].parent = Some("elsewhere".to_string());
+        infer_copied_parents(&mut nodes, &lineage);
+        assert_eq!(nodes[1].parent.as_deref(), Some("elsewhere"));
+        assert!(nodes[1].fork_msg.is_none());
+    }
+
+    fn named(id: &str, parent: Option<&str>, name: &str, title: Option<&str>) -> Node {
+        let mut n = node(id, parent, 0);
+        n.name = Some(name.to_string());
+        n.title = title.map(String::from);
+        n.heading = n.name.clone();
+        n.label = name.to_string();
+        n
+    }
+
+    #[test]
+    fn an_inherited_name_gives_way_to_the_forks_own_title() {
+        let mut nodes = vec![
+            // Renamed since the copies were taken.
+            named("P", None, "smee diagnose", Some("Generated")),
+            // Still carrying the name P had when it was copied: show its own title.
+            named("C", Some("P"), "live progress", Some("live progress ⑂")),
+            // Renamed after forking: the name is its own and wins.
+            named("R", Some("P"), "live progress v2", Some("live progress ⑂")),
+            // Inherited, but no title to show instead.
+            named("U", Some("P"), "live progress", None),
+        ];
+        let mut lineage: Vec<Lineage> = (0..nodes.len()).map(|_| Lineage::default()).collect();
+        lineage[0].names = ["live progress", "smee diagnose"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        prefer_own_titles(&mut nodes, &lineage);
+        let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "smee diagnose",
+                "live progress ⑂",
+                "live progress v2",
+                "live progress"
+            ]
+        );
+        assert_eq!(nodes[1].heading.as_deref(), Some("live progress ⑂"));
+        assert_eq!(nodes[1].name.as_deref(), Some("live progress"));
     }
 
     /// A fork whose parent transcript lives in another project cannot be drawn under it,
