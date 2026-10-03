@@ -129,7 +129,7 @@ need to track capture state per payment intent and make the refund
 handler idempotent so replayed webhook events don't trigger duplicate
 …
 
-↑/↓/hover: navigate   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit
+↑/↓/hover: navigate   ⇧↑/↓: by recency   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit
 ```
 
 Row 4 is the current selection — shown in reverse video in a real terminal (a
@@ -159,6 +159,9 @@ inside a session of this project. The full timestamp for the selected row is in 
 panel below.
 
 - **↑/↓** or **j/k**, or **mouse hover** — move the selection.
+- **Shift+↑/↓** or **K/J** — step by row number instead of tree position: to the next
+  newer (lower number) or older (higher number) branch, wherever it sits in the tree. In
+  a search they step through the matches only, skipping grey context rows.
 - **p** or **←** — jump the selection to the branch this one was forked from (its
   parent). On a root branch it does nothing.
 - **→** — descend to this branch's most recent child. On a branch with no forks off it,
@@ -194,8 +197,8 @@ The selection starts on the **first actual match** (row 3), never on a grey cont
 row, and stays put as you keep typing for as long as that branch still matches.
 Context rows are still fully selectable and resumable if you want one.
 
-- **↑/↓** still move the selection while you type — every other printable key is text,
-  so `j`, `k`, `p` and `q` type instead of navigating.
+- **↑/↓** and **Shift+↑/↓** still move the selection while you type — every other
+  printable key is text, so `j`, `k`, `J`, `K`, `p` and `q` type instead of navigating.
 - **Backspace** deletes, **Ctrl-U** clears the query.
 - **Enter** accepts the filter and drops you back into normal navigation over the
   matching rows. Resuming a branch then takes a second **Enter**, so the handoff to

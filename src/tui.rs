@@ -65,6 +65,19 @@ fn parse_sgr_mouse(seq: &[u8]) -> Option<(u32, u32, u32, u8)> {
     Some((b, x, y, kind))
 }
 
+/// `ESC [ 1 ; <m> <final>` — the xterm modifier on a cursor key, as its bitmask
+/// (1 shift, 2 alt, 4 ctrl); 0 for a bare key. The wire value is `1 + bitmask`.
+fn csi_modifiers(seq: &[u8]) -> u32 {
+    if seq.len() < 3 {
+        return 0;
+    }
+    std::str::from_utf8(&seq[2..seq.len() - 1])
+        .ok()
+        .and_then(|p| p.split(';').nth(1))
+        .and_then(|m| m.parse::<u32>().ok())
+        .map_or(0, |m| m.saturating_sub(1))
+}
+
 struct Picker<'a> {
     nodes: &'a [Node],
     ctx: Ctx,
@@ -187,6 +200,30 @@ impl<'a> Picker<'a> {
         let last = (self.rows.len() - 1) as isize;
         self.selected = i.clamp(0, last) as usize;
         self.render();
+    }
+
+    /// Step by recency number rather than tree position: `delta > 0` to the next older
+    /// branch, `delta < 0` to the next newer one. A filtered view keeps the original
+    /// numbers, so they have gaps; this takes the nearest one in that direction, and
+    /// skips context rows so a search steps through its hits only. Does nothing at
+    /// either end.
+    fn move_by_index(&mut self, delta: isize) {
+        let cur = match self.current() {
+            Some(ri) => self.rows[ri].index,
+            None => return,
+        };
+        let next = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.matched != Some(false))
+            .filter(|(_, r)| if delta > 0 { r.index > cur } else { r.index < cur })
+            .min_by_key(|(_, r)| r.index.abs_diff(cur))
+            .map(|(i, _)| i);
+        if let Some(i) = next {
+            self.selected = i;
+            self.render();
+        }
     }
 
     /// Jump to the branch this one forked from. `effective_parent` is non-null only when
@@ -434,9 +471,9 @@ impl<'a> Picker<'a> {
         let footer = if self.search_mode {
             "type to filter   ↑/↓: select   Enter: accept   Esc: cancel"
         } else if !self.query.is_empty() {
-            "↑/↓/hover: navigate   p/←: parent   →: child   Enter/click: resume   Esc: clear search"
+            "↑/↓/hover: navigate   ⇧↑/↓: by recency   p/←: parent   →: child   Enter/click: resume   Esc: clear search"
         } else {
-            "↑/↓/hover: navigate   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit"
+            "↑/↓/hover: navigate   ⇧↑/↓: by recency   s: search   p/←: parent   →: child   Enter/click: resume   Esc: quit"
         };
         buf.push_str(&dim(footer));
         buf.push_str("\x1b[K");
@@ -490,8 +527,12 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn dispatch_csi_final(&mut self, f: u8) {
+    fn dispatch_csi_final(&mut self, f: u8, shift: bool) {
         match f {
+            // Shift+↑/↓ walk the recency numbers; every other modifier combo acts as
+            // the bare key, as it did before modifiers were read at all.
+            b'A' if shift => self.move_by_index(-1),
+            b'B' if shift => self.move_by_index(1),
             b'A' => self.move_sel(-1),
             b'B' => self.move_sel(1),
             b'H' => self.jump_to(0),
@@ -578,6 +619,11 @@ impl<'a> Picker<'a> {
                     self.move_sel(-1);
                 } else if ch == b'j' {
                     self.move_sel(1);
+                } else if ch == b'K' {
+                    // Shifted j/k mirror Shift+↑/↓, for terminals that don't send those.
+                    self.move_by_index(-1);
+                } else if ch == b'J' {
+                    self.move_by_index(1);
                 } else if ch == b'p' {
                     self.select_parent();
                 } else if ch == b'g' {
@@ -615,19 +661,23 @@ impl<'a> Picker<'a> {
                 let seq = rest[..seq_len].to_vec();
                 match parse_sgr_mouse(&seq) {
                     Some((b, _x, yy, kind)) => self.handle_mouse(b, yy, kind),
-                    None => self.dispatch_csi_final(seq[seq_len - 1]),
+                    None => {
+                        let shift = csi_modifiers(&seq) & 1 != 0;
+                        self.dispatch_csi_final(seq[seq_len - 1], shift)
+                    }
                 }
                 i += seq_len;
                 continue;
             }
             if rest[1] == b'O' {
-                // SS3 application cursor keys: ESC O <final>.
+                // SS3 application cursor keys: ESC O <final>. No parameters, so no
+                // modifiers: a shifted arrow comes as CSI even in application mode.
                 if rest.len() < 3 {
                     self.input_buf = rest.to_vec();
                     return;
                 }
                 let f = rest[2];
-                self.dispatch_csi_final(f);
+                self.dispatch_csi_final(f, false);
                 i += 3;
                 continue;
             }
@@ -832,5 +882,20 @@ pub fn debug_mouse() -> ! {
             }
             k += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csi_modifiers_reads_the_xterm_modifier_param() {
+        assert_eq!(csi_modifiers(b"\x1b[A"), 0);
+        assert_eq!(csi_modifiers(b"\x1b[1;2A"), 1);
+        assert_eq!(csi_modifiers(b"\x1b[1;5B"), 4);
+        // Shift+Ctrl: the shift bit is still set.
+        assert_eq!(csi_modifiers(b"\x1b[1;6A") & 1, 1);
+        assert_eq!(csi_modifiers(b"\x1b[1;xA"), 0);
     }
 }
