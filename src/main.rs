@@ -432,10 +432,8 @@ fn main() {
         }
     });
     // Needs every transcript at once: a copy's parent is whichever other one holds its
-    // history, and whether its name is its own depends on the parent's. The uuid sets
-    // are dropped as soon as both are settled.
+    // history. The uuid sets are dropped as soon as that is settled.
     tree::infer_copied_parents(&mut nodes, &lineage);
-    tree::prefer_own_titles(&mut nodes, &lineage);
     drop(lineage);
 
     for n in nodes.iter_mut() {

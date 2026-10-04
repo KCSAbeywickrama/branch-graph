@@ -71,10 +71,9 @@ impl Node {
     }
 }
 
-/// What relates a transcript to its parent: the message ids it holds, which place a fork
-/// that carries no `forkedFrom` (`tree::infer_copied_parents`), and the names it has
-/// carried, which tell a fork's inherited name from its own (`tree::prefer_own_titles`).
-/// Kept beside the `Node` rather than in it, so it can be dropped once both are settled.
+/// The message ids a transcript holds, which is all `tree::infer_copied_parents` needs to
+/// place a fork that carries no `forkedFrom`. Kept beside the `Node` rather than in it,
+/// so it can be dropped once parents are settled.
 #[derive(Default)]
 pub struct Lineage {
     /// Every message uuid in the transcript, on the active path or not.
@@ -82,9 +81,6 @@ pub struct Lineage {
     /// The active path, root first, followed across compaction boundaries. Left empty
     /// when the transcript names its parent in `forkedFrom`, since nothing is inferred.
     pub path: Vec<String>,
-    /// Every explicit name the transcript recorded, cleaned like `Node::name` — not just
-    /// the latest, since a parent renamed after the fork no longer matches its copy.
-    pub names: HashSet<String>,
 }
 
 /// One line of the drawn tree: which node, and the tree art leading to it.

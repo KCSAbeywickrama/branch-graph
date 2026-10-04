@@ -83,41 +83,6 @@ pub fn infer_copied_parents(nodes: &mut [Node], lineage: &[Lineage]) {
     }
 }
 
-/// Prefer a fork's own title over a name it merely inherited. A copy can start out with
-/// its parent's `custom-title` (`--fork-session` carries it across), and until it is
-/// renamed that name only repeats its parent's, while the title Claude Code gives the
-/// copy ("<name> ⑂") tells the two apart. The parent may have been renamed since, so any
-/// name it ever carried counts. Only the display changes: `name` keeps what the
-/// transcript recorded. Runs once parents are settled, recorded or inferred.
-pub fn prefer_own_titles(nodes: &mut [Node], lineage: &[Lineage]) {
-    let idx_by_id: HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.session_id.as_str(), i))
-        .collect();
-    let inherited: Vec<usize> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| {
-            let parent_names = n
-                .parent
-                .as_deref()
-                .and_then(|p| idx_by_id.get(p))
-                .map(|&p| &lineage[p].names);
-            match (n.name.as_ref(), parent_names) {
-                (Some(name), Some(names)) => n.title.is_some() && names.contains(name),
-                _ => false,
-            }
-        })
-        .map(|(i, _)| i)
-        .collect();
-    for i in inherited {
-        let n = &mut nodes[i];
-        n.heading = n.title.clone();
-        n.label = n.title.clone().unwrap_or_default();
-    }
-}
-
 /// Resolve each node's `parent` against the sessions actually present here.
 /// A fork whose parent transcript lives in another project becomes a root, which is
 /// also what makes `..` able to say so rather than guessing.
@@ -286,7 +251,6 @@ mod tests {
         let lineage = Lineage {
             uuids: path.iter().chain(extra).map(|s| s.to_string()).collect(),
             path: path.iter().map(|s| s.to_string()).collect(),
-            names: HashSet::new(),
         };
         (n, lineage)
     }
@@ -346,47 +310,6 @@ mod tests {
         infer_copied_parents(&mut nodes, &lineage);
         assert_eq!(nodes[1].parent.as_deref(), Some("elsewhere"));
         assert!(nodes[1].fork_msg.is_none());
-    }
-
-    fn named(id: &str, parent: Option<&str>, name: &str, title: Option<&str>) -> Node {
-        let mut n = node(id, parent, 0);
-        n.name = Some(name.to_string());
-        n.title = title.map(String::from);
-        n.heading = n.name.clone();
-        n.label = name.to_string();
-        n
-    }
-
-    #[test]
-    fn an_inherited_name_gives_way_to_the_forks_own_title() {
-        let mut nodes = vec![
-            // Renamed since the copies were taken.
-            named("P", None, "smee diagnose", Some("Generated")),
-            // Still carrying the name P had when it was copied: show its own title.
-            named("C", Some("P"), "live progress", Some("live progress ⑂")),
-            // Renamed after forking: the name is its own and wins.
-            named("R", Some("P"), "live progress v2", Some("live progress ⑂")),
-            // Inherited, but no title to show instead.
-            named("U", Some("P"), "live progress", None),
-        ];
-        let mut lineage: Vec<Lineage> = (0..nodes.len()).map(|_| Lineage::default()).collect();
-        lineage[0].names = ["live progress", "smee diagnose"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        prefer_own_titles(&mut nodes, &lineage);
-        let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "smee diagnose",
-                "live progress ⑂",
-                "live progress v2",
-                "live progress"
-            ]
-        );
-        assert_eq!(nodes[1].heading.as_deref(), Some("live progress ⑂"));
-        assert_eq!(nodes[1].name.as_deref(), Some("live progress"));
     }
 
     /// A fork whose parent transcript lives in another project cannot be drawn under it,

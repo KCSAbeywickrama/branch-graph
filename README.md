@@ -140,9 +140,7 @@ for naming a session:
 
 - **Explicit branch name** — set with `/branch <name>` or `/rename`, shown bold. Rows 6
   (`stripe-webhooks`) and 3 (`paypal-webhooks`). A name you set always wins over
-  Claude's generated title, so a `/rename` shows up here immediately. The exception is a
-  name a fork merely inherited: a `--fork-session` copy can start out with its parent's
-  name, and until you rename it, it shows its own title (`<name> ⑂`) instead.
+  Claude's generated title, so a `/rename` shows up here immediately.
 - **AI-generated title** — Claude's own summary of the session (`aiTitle`), shown
   bold. Rows 8, 7, and 1.
 - **First prompt** — falls back to the branch's own first typed message when it has

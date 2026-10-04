@@ -313,7 +313,6 @@ pub fn scan_session(file: &Path, session_id: &str) -> (Node, Lineage) {
     let mut title: Option<String> = None;
     let mut slug: Option<String> = None;
     let mut name: Option<String> = None;
-    let mut names: HashSet<String> = HashSet::new();
     // messageUuid of the last replayed line = divergence leaf.
     let mut last_fork_msg: Option<String> = None;
     let mut leaf_uuid: Option<String> = None;
@@ -405,9 +404,6 @@ pub fn scan_session(file: &Path, session_id: &str) -> (Node, Lineage) {
             .filter(|t| !t.is_empty())
         {
             if !is_auto_branch_name(t) {
-                if name.as_deref() != Some(t) {
-                    names.insert(clean_prompt(t));
-                }
                 name = Some(t.to_string());
             }
         }
@@ -514,11 +510,9 @@ pub fn scan_session(file: &Path, session_id: &str) -> (Node, Lineage) {
     } else {
         Vec::new()
     };
-    names.retain(|n| !n.is_empty());
     let lineage = Lineage {
         uuids: nodes.into_keys().collect(),
         path: lineage_path,
-        names,
     };
     (info, lineage)
 }
@@ -671,6 +665,23 @@ mod tests {
         ])
         .0;
         assert_eq!(untitled.heading.as_deref(), Some("Generated title"));
+    }
+
+    /// A copy renamed to the same name its parent later took keeps that name. The bug
+    /// this guards against showed the copy's "⑂" title instead, once the parent's name
+    /// caught up with it. Records follow a real `--fork-session` copy's transcript.
+    #[test]
+    fn a_fork_keeps_its_name_even_when_it_matches_its_parents() {
+        let (node, _) = scan_lines(&[
+            r#"{"type":"ai-title","aiTitle":"ai remote - app side ⑂"}"#,
+            r#"{"type":"system","subtype":"local_command","uuid":"r0","parentUuid":null,"content":"<command-name>/rename</command-name><command-args>ai remote - app side</command-args>"}"#,
+            r#"{"type":"user","uuid":"u1","parentUuid":"r0","message":{"content":"a prompt"}}"#,
+            r#"{"type":"ai-title","aiTitle":"ai remote - app side ⑂"}"#,
+            r#"{"type":"custom-title","customTitle":"depricated"}"#,
+            r#"{"type":"system","subtype":"local_command","uuid":"r1","parentUuid":"u1","content":"<command-name>/rename</command-name><command-args>depricated</command-args>"}"#,
+        ]);
+        assert_eq!(node.label, "depricated");
+        assert_eq!(node.heading.as_deref(), Some("depricated"));
     }
 
     /// A `--fork-session` copy has no `forkedFrom`, so its parent is traced from the
